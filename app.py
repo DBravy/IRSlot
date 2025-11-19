@@ -365,6 +365,17 @@ def get_training_state():
     if state['start_time']:
         elapsed = (datetime.now() - datetime.fromisoformat(state['start_time'])).total_seconds()
         state['elapsed_time'] = elapsed
+
+    # Sanitize metrics for JSON serialization
+    if 'metrics' in state:
+        state['metrics'] = {
+            'epochs': state['metrics']['epochs'][:],  # Copy the list
+            'train_loss': [_sanitize_metric(v) for v in state['metrics']['train_loss']],
+            'train_accuracy': [_sanitize_metric(v) for v in state['metrics']['train_accuracy']],
+            'positive_similarity': [_sanitize_metric(v) for v in state['metrics']['positive_similarity']],
+            'negative_similarity': [_sanitize_metric(v) for v in state['metrics']['negative_similarity']],
+        }
+
     return state
 
 
