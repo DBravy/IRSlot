@@ -18,6 +18,5 @@
   "num_workers": 4,
   "checkpoint_dir": "checkpoints_agi2",
   "save_every": 10,
-  "device": "cpu",
-  "web_port": 5004
+  "device": "cpu"
 }

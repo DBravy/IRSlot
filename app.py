@@ -12,6 +12,7 @@ import json
 import argparse
 import torch
 import time
+import math
 from datetime import datetime
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO
@@ -34,6 +35,7 @@ training_state = {
     'total_epochs': 0,
     'current_batch': 0,
     'total_batches': 0,
+    'global_step': 0,
     'metrics': {
         'epochs': [],
         'train_loss': [],
@@ -59,6 +61,23 @@ training_components = {
 }
 
 
+def _sanitize_metric(value, default=0.0):
+    """
+    Ensure metrics we send over Socket.IO / JSON are finite numbers.
+
+    Socket/JSON transports can choke on NaN/inf, which would make the
+    frontend stop receiving updates after the first bad value.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+    if not math.isfinite(v):
+        return float(default)
+    return v
+
+
 def initialize_training(config):
     """Initialize all training components from config."""
     print("Initializing training components...")
@@ -80,7 +99,7 @@ def initialize_training(config):
         dataset,
         batch_size=config['batch_size'],
         shuffle=True,
-        num_workers=config.get('num_workers', 4),
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues on macOS
         collate_fn=collate_fn_pad,
         pin_memory=True if device == 'cuda' else False
     )
@@ -129,6 +148,7 @@ def initialize_training(config):
     # Update state
     training_state['total_epochs'] = config['num_epochs']
     training_state['total_batches'] = len(dataloader)
+    training_state['global_step'] = 0
     training_state['config'] = {
         'data_dir': config['data_dir'],
         'dataset_size': len(dataset),
@@ -171,6 +191,11 @@ def train_epoch(epoch):
     total_neg_sim = 0.0
     num_batches = 0
 
+    # Calculate batch_log_interval once before the loop
+    batch_log_interval = max(1, int(config.get('batch_log_interval', 1)))
+    print(f"Epoch {epoch}: Will emit batch updates every {batch_log_interval} batches")
+    emission_count = 0
+
     for batch_idx, batch in enumerate(dataloader):
         # Check status
         if training_state['status'] == 'stopped':
@@ -180,6 +205,7 @@ def train_epoch(epoch):
             time.sleep(0.1)
 
         training_state['current_batch'] = batch_idx + 1
+        training_state['global_step'] += 1
 
         grid_ids = batch['grid_ids'].to(device)
         grids = batch['grids'].to(device)
@@ -203,32 +229,46 @@ def train_epoch(epoch):
         # Update memory bank
         memory_bank.update(grid_ids, embeddings.detach())
 
-        # Track metrics
+        # Track metrics (keep raw values for epoch averages)
         total_loss += metrics['loss']
         total_accuracy += metrics['accuracy']
         total_pos_sim += metrics['avg_positive_sim']
         total_neg_sim += metrics['avg_negative_sim']
         num_batches += 1
 
-        # Send batch update every N batches (configurable)
-        batch_log_interval = config.get('batch_log_interval', 10)
-        if batch_log_interval <= 1 or batch_idx % batch_log_interval == 0:
-            socketio.emit('batch_update', {
-                'epoch': epoch,
-                'batch': batch_idx + 1,
-                'total_batches': training_state['total_batches'],
-                'total_epochs': training_state['total_epochs'],
-                'loss': metrics['loss'],
-                'accuracy': metrics['accuracy'],
-                'avg_positive_sim': metrics['avg_positive_sim'],
-                'avg_negative_sim': metrics['avg_negative_sim'],
-            })
+        # Prepare JSON-safe metrics for live updates
+        safe_loss = _sanitize_metric(metrics['loss'])
+        safe_acc = _sanitize_metric(metrics['accuracy'])
+        safe_pos_sim = _sanitize_metric(metrics['avg_positive_sim'])
+        safe_neg_sim = _sanitize_metric(metrics['avg_negative_sim'])
+
+        # Send batch update every N batches (configurable, 1-based)
+        if batch_idx == 0 or (batch_idx + 1) % batch_log_interval == 0:
+            emission_count += 1
+            print(f"Emitting batch_update #{emission_count}: epoch={epoch}, batch={batch_idx + 1}/{len(dataloader)}, step={training_state['global_step']}, loss={safe_loss:.4f}")
+            try:
+                socketio.emit('batch_update', {
+                    'epoch': epoch,
+                    'batch': batch_idx + 1,
+                    'step': training_state['global_step'],
+                    'total_batches': training_state['total_batches'],
+                    'total_epochs': training_state['total_epochs'],
+                    'loss': safe_loss,
+                    'accuracy': safe_acc,
+                    'avg_positive_sim': safe_pos_sim,
+                    'avg_negative_sim': safe_neg_sim,
+                })
+                socketio.sleep(0.001)  # Small yield to allow the message to be sent
+            except Exception as e:
+                print(f"ERROR: Failed to emit batch_update: {e}")
 
     # Compute epoch metrics
     avg_loss = total_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
     avg_pos_sim = total_pos_sim / num_batches
     avg_neg_sim = total_neg_sim / num_batches
+
+    print(f"Epoch {epoch} complete: Emitted {emission_count} batch updates out of {num_batches} total batches")
 
     return {
         'loss': avg_loss,
@@ -355,6 +395,7 @@ def api_start():
             training_state['total_epochs'] = 0
             training_state['current_batch'] = 0
             training_state['total_batches'] = 0
+            training_state['global_step'] = 0
             training_state['metrics'] = {
                 'epochs': [],
                 'train_loss': [],

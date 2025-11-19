@@ -462,54 +462,80 @@
 
         // Update charts
         function updateCharts() {
-            const lossTrace = {
-                x: trainingData.epochs,
-                y: trainingData.loss,
-                name: 'Loss',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#f87171', width: 2 },
-                marker: { size: 6 }
-            };
+            console.log(`📈 Updating charts with ${trainingData.epochs.length} data points`);
+            if (trainingData.epochs.length > 0) {
+                const minX = Math.min(...trainingData.epochs);
+                const maxX = Math.max(...trainingData.epochs);
+                console.log(`   X-axis range: ${minX} to ${maxX}`);
+                console.log(`   Data points at steps: ${trainingData.epochs.join(', ')}`);
+            }
 
-            const accuracyTrace = {
-                x: trainingData.epochs,
-                y: trainingData.accuracy,
-                name: 'Accuracy',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#4ade80', width: 2 },
-                marker: { size: 6 },
-                yaxis: 'y2'
-            };
+            try {
+                const lossTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.loss,
+                    name: 'Loss',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#f87171', width: 2 },
+                    marker: { size: 6 }
+                };
 
-            Plotly.react('loss-accuracy-chart', [lossTrace, accuracyTrace], {
-                ...lossAccuracyLayout,
-                yaxis: { title: 'Loss', gridcolor: '#2a2a3e', side: 'left' },
-                yaxis2: { title: 'Accuracy', gridcolor: '#2a2a3e', overlaying: 'y', side: 'right' }
-            });
+                const accuracyTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.accuracy,
+                    name: 'Accuracy',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#4ade80', width: 2 },
+                    marker: { size: 6 },
+                    yaxis: 'y2'
+                };
 
-            const posSimTrace = {
-                x: trainingData.epochs,
-                y: trainingData.posSim,
-                name: 'Positive',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#4ade80', width: 2 },
-                marker: { size: 6 }
-            };
+                // Use newPlot instead of react to force complete redraw
+                Plotly.newPlot('loss-accuracy-chart', [lossTrace, accuracyTrace], {
+                    paper_bgcolor: '#1a1a2e',
+                    plot_bgcolor: '#1a1a2e',
+                    font: { color: '#e0e0e0' },
+                    xaxis: { title: 'Step', gridcolor: '#2a2a3e', autorange: true },
+                    yaxis: { title: 'Loss', gridcolor: '#2a2a3e', side: 'left', autorange: true },
+                    yaxis2: { title: 'Accuracy', gridcolor: '#2a2a3e', overlaying: 'y', side: 'right', autorange: true },
+                    legend: { x: 0.1, y: 1.1, orientation: 'h' }
+                });
 
-            const negSimTrace = {
-                x: trainingData.epochs,
-                y: trainingData.negSim,
-                name: 'Negative',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#667eea', width: 2 },
-                marker: { size: 6 }
-            };
+                const posSimTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.posSim,
+                    name: 'Positive',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#4ade80', width: 2 },
+                    marker: { size: 6 }
+                };
 
-            Plotly.react('similarity-chart', [posSimTrace, negSimTrace], similarityLayout);
+                const negSimTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.negSim,
+                    name: 'Negative',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#667eea', width: 2 },
+                    marker: { size: 6 }
+                };
+
+                // Use newPlot instead of react to force complete redraw
+                Plotly.newPlot('similarity-chart', [posSimTrace, negSimTrace], {
+                    paper_bgcolor: '#1a1a2e',
+                    plot_bgcolor: '#1a1a2e',
+                    font: { color: '#e0e0e0' },
+                    xaxis: { title: 'Step', gridcolor: '#2a2a3e', autorange: true },
+                    yaxis: { title: 'Similarity', gridcolor: '#2a2a3e', autorange: true },
+                    legend: { x: 0.1, y: 1.1, orientation: 'h' }
+                });
+                console.log('✓ Charts updated successfully');
+            } catch (error) {
+                console.error('❌ Error updating charts:', error);
+            }
         }
 
         // Control functions
@@ -711,6 +737,32 @@
         window.pauseTraining = pauseTraining;
         window.stopTraining = stopTraining;
 
+        // Debug helper: manually reset chart zoom/range
+        window.resetChartZoom = function() {
+            console.log('🔄 Resetting chart zoom...');
+            Plotly.relayout('loss-accuracy-chart', {
+                'xaxis.autorange': true,
+                'yaxis.autorange': true,
+                'yaxis2.autorange': true
+            });
+            Plotly.relayout('similarity-chart', {
+                'xaxis.autorange': true,
+                'yaxis.autorange': true
+            });
+            console.log('✓ Chart zoom reset');
+        };
+
+        // Debug helper: inspect training data
+        window.inspectData = function() {
+            console.log('📊 Training Data:', trainingData);
+            console.log(`   Total points: ${trainingData.epochs.length}`);
+            if (trainingData.epochs.length > 0) {
+                console.log(`   X range: ${Math.min(...trainingData.epochs)} to ${Math.max(...trainingData.epochs)}`);
+                console.log(`   Steps: ${trainingData.epochs.join(', ')}`);
+            }
+            return trainingData;
+        };
+
         // Fallback: periodically poll backend state so UI/graphs update
         async function pollState() {
             try {
@@ -739,8 +791,8 @@
             trainingData.accuracy = [];
             trainingData.posSim = [];
             trainingData.negSim = [];
-            globalStep = 0;
-            console.log('📊 Reset charts; will populate based on batch updates');
+            globalStep = state.global_step || 0;
+            console.log('📊 Reset charts; will populate based on batch updates. Starting at step', globalStep);
             updateCharts();
         });
 
@@ -753,24 +805,27 @@
 
         socket.on('batch_update', (data) => {
             // Update current batch info and live graphs within an epoch
-            console.log(`⚙️ Batch ${data.batch}/${data.total_batches} (epoch ${data.epoch}) - Loss: ${data.loss.toFixed(4)}`);
+            console.log(`⚙️ Batch ${data.batch}/${data.total_batches} (epoch ${data.epoch}) - Loss: ${data.loss.toFixed(4)}, step ${data.step}`);
 
             const totalBatches = data.total_batches || 1;
             const totalEpochs = data.total_epochs || 1;
 
-            // Use global step index as x-axis
-            globalStep += 1;
+            // Use backend-provided global step if available, otherwise local counter
+            if (typeof data.step === 'number') {
+                globalStep = data.step;
+            } else {
+                globalStep += 1;
+            }
             const x = globalStep;
 
+            // Always push to all arrays to keep lengths consistent
             trainingData.epochs.push(x);
-            trainingData.loss.push(data.loss);
-            trainingData.accuracy.push(data.accuracy);
-            if (typeof data.avg_positive_sim === 'number') {
-                trainingData.posSim.push(data.avg_positive_sim);
-            }
-            if (typeof data.avg_negative_sim === 'number') {
-                trainingData.negSim.push(data.avg_negative_sim);
-            }
+            trainingData.loss.push(data.loss || 0);
+            trainingData.accuracy.push(data.accuracy || 0);
+            trainingData.posSim.push(data.avg_positive_sim || 0);
+            trainingData.negSim.push(data.avg_negative_sim || 0);
+
+            console.log(`📊 Chart data point added: step=${x}, arrays length=${trainingData.epochs.length}`);
 
             // Update "Current Metrics" card live
             document.getElementById('current-loss').textContent = data.loss.toFixed(4);
