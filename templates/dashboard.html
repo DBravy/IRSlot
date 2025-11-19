@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slot Attention Training Dashboard</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: #0f0f1e;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: white;
+        }
+
+        .subtitle {
+            color: rgba(255,255,255,0.9);
+            font-size: 1.1em;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: #1a1a2e;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            border: 1px solid #2a2a3e;
+        }
+
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .stat {
+            background: #252538;
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .stat-label {
+            color: #888;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #e0e0e0;
+        }
+
+        .stat-value.good {
+            color: #4ade80;
+        }
+
+        .stat-value.bad {
+            color: #f87171;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            box-shadow: none;
+            filter: grayscale(0.6);
+        }
+
+        .btn-start {
+            background: #4ade80;
+            color: #0f0f1e;
+        }
+
+        .btn-pause {
+            background: #fbbf24;
+            color: #0f0f1e;
+        }
+
+        .btn-stop {
+            background: #f87171;
+            color: white;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9em;
+            margin-left: 15px;
+        }
+
+        .status.running {
+            background: #4ade80;
+            color: #0f0f1e;
+        }
+
+        .status.paused {
+            background: #fbbf24;
+            color: #0f0f1e;
+        }
+
+        .status.stopped {
+            background: #888;
+            color: white;
+        }
+
+        .chart-container {
+            background: #1a1a2e;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            border: 1px solid #2a2a3e;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px;
+        }
+
+        .config-item {
+            background: #252538;
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        .config-key {
+            color: #888;
+            font-size: 0.85em;
+        }
+
+        .config-value {
+            color: #e0e0e0;
+            font-weight: 600;
+            margin-top: 5px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #252538;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-top: 15px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.5s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+        }
+
+        .form-label {
+            display: block;
+            color: #888;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 10px;
+            background: #252538;
+            border: 1px solid #2a2a3e;
+            border-radius: 5px;
+            color: #e0e0e0;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-input:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎯 Slot Attention Training Dashboard</h1>
+        <div class="subtitle">
+            Real-time monitoring for instance recognition training
+            <span id="status" class="status stopped">Stopped</span>
+        </div>
+    </div>
+
+    <div class="card" id="config-card">
+        <h2>Training Configuration</h2>
+        <div id="config-form-container">
+            <form id="config-form" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+                <div style="grid-column: 1 / -1;">
+                    <label class="form-label">Data Directory *</label>
+                    <select id="data_dir" class="form-input" required>
+                        <option value="data/processed_agi1">data/processed_agi1</option>
+                        <option value="data/processed_agi2" selected>data/processed_agi2</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="form-label">Number of Epochs</label>
+                    <input type="number" id="num_epochs" class="form-input" value="100">
+                </div>
+
+                <div>
+                    <label class="form-label">Batch Size</label>
+                    <input type="number" id="batch_size" class="form-input" value="32">
+                </div>
+
+                <div>
+                    <label class="form-label">Learning Rate</label>
+                    <input type="number" id="lr" class="form-input" value="0.0001" step="0.0001">
+                </div>
+
+                <div>
+                    <label class="form-label">Number of Slots</label>
+                    <input type="number" id="num_slots" class="form-input" value="7">
+                </div>
+
+                <div>
+                    <label class="form-label">Slot Dimension</label>
+                    <input type="number" id="slot_dim" class="form-input" value="64">
+                </div>
+
+                <div>
+                    <label class="form-label">Embedding Dimension</label>
+                    <input type="number" id="embedding_dim" class="form-input" value="128">
+                </div>
+
+                <div>
+                    <label class="form-label">Encoder Feature Dim</label>
+                    <input type="number" id="encoder_feature_dim" class="form-input" value="64">
+                </div>
+
+                <div>
+                    <label class="form-label">Encoder Hidden Dim</label>
+                    <input type="number" id="encoder_hidden_dim" class="form-input" value="128">
+                </div>
+
+                <div>
+                    <label class="form-label">Slot Iterations</label>
+                    <input type="number" id="num_iterations" class="form-input" value="3">
+                </div>
+
+                <div>
+                    <label class="form-label">Temperature</label>
+                    <input type="number" id="temperature" class="form-input" value="0.07" step="0.01">
+                </div>
+
+                <div>
+                    <label class="form-label">Momentum</label>
+                    <input type="number" id="momentum" class="form-input" value="0.5" step="0.1">
+                </div>
+
+                <div>
+                    <label class="form-label">Negative Samples</label>
+                    <input type="number" id="num_negatives" class="form-input" value="2048">
+                </div>
+
+                <div>
+                    <label class="form-label">Batch Log Interval</label>
+                    <input type="number" id="batch_log_interval" class="form-input" value="10">
+                </div>
+
+                <div>
+                    <label class="form-label">Checkpoint Directory</label>
+                    <input type="text" id="checkpoint_dir" class="form-input" value="checkpoints">
+                </div>
+
+                <div>
+                    <label class="form-label">Save Every N Epochs</label>
+                    <input type="number" id="save_every" class="form-input" value="10">
+                </div>
+            </form>
+        </div>
+        <div id="config-display" style="display: none;">
+            <div class="config-grid" id="config-grid"></div>
+        </div>
+    </div>
+
+    <div class="dashboard">
+        <div class="card">
+            <h2>Training Progress</h2>
+            <div class="stat">
+                <div class="stat-label">Epoch</div>
+                <div class="stat-value" id="current-epoch">0 / 0</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill" style="width: 0%">0%</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Current Metrics</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-label">Loss</div>
+                    <div class="stat-value" id="current-loss">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Accuracy</div>
+                    <div class="stat-value good" id="current-accuracy">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Pos. Similarity</div>
+                    <div class="stat-value good" id="current-pos-sim">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Neg. Similarity</div>
+                    <div class="stat-value" id="current-neg-sim">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Training Controls</h2>
+            <div class="controls">
+                <button class="btn btn-start" id="btn-start" onclick="startTraining()">
+                    ▶ Start Training
+                </button>
+                <button class="btn btn-pause" id="btn-pause" onclick="pauseTraining()" disabled>
+                    ⏸ Pause
+                </button>
+                <button class="btn btn-stop" id="btn-stop" onclick="stopTraining()" disabled>
+                    ⏹ Stop
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h2 style="color: #667eea; margin-bottom: 15px;">Loss & Accuracy</h2>
+        <div id="loss-accuracy-chart"></div>
+    </div>
+
+    <div class="chart-container">
+        <h2 style="color: #667eea; margin-bottom: 15px;">Similarity Scores</h2>
+        <div id="similarity-chart"></div>
+    </div>
+
+    <script>
+        console.log('Dashboard script loading...');
+        const socket = io();
+
+        socket.on('connect', () => {
+            console.log('✓ Socket connected!');
+        });
+
+        socket.on('disconnect', () => {
+            console.log('✗ Socket disconnected!');
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('Socket connection error:', error);
+        });
+
+        let trainingData = {
+            epochs: [],  // used as generic x-axis (we'll treat these as steps)
+            loss: [],
+            accuracy: [],
+            posSim: [],
+            negSim: []
+        };
+
+        // Global step counter for x-axis
+        let globalStep = 0;
+
+        // Initialize charts
+        const lossAccuracyLayout = {
+            paper_bgcolor: '#1a1a2e',
+            plot_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' },
+            xaxis: { title: 'Step', gridcolor: '#2a2a3e' },
+            yaxis: { title: 'Value', gridcolor: '#2a2a3e' },
+            legend: { x: 0.1, y: 1.1, orientation: 'h' }
+        };
+
+        const similarityLayout = {
+            paper_bgcolor: '#1a1a2e',
+            plot_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' },
+            xaxis: { title: 'Step', gridcolor: '#2a2a3e' },
+            yaxis: { title: 'Similarity', gridcolor: '#2a2a3e' },
+            legend: { x: 0.1, y: 1.1, orientation: 'h' }
+        };
+
+        Plotly.newPlot('loss-accuracy-chart', [], lossAccuracyLayout);
+        Plotly.newPlot('similarity-chart', [], similarityLayout);
+
+        // Update charts
+        function updateCharts() {
+            const lossTrace = {
+                x: trainingData.epochs,
+                y: trainingData.loss,
+                name: 'Loss',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#f87171', width: 2 },
+                marker: { size: 6 }
+            };
+
+            const accuracyTrace = {
+                x: trainingData.epochs,
+                y: trainingData.accuracy,
+                name: 'Accuracy',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#4ade80', width: 2 },
+                marker: { size: 6 },
+                yaxis: 'y2'
+            };
+
+            Plotly.react('loss-accuracy-chart', [lossTrace, accuracyTrace], {
+                ...lossAccuracyLayout,
+                yaxis: { title: 'Loss', gridcolor: '#2a2a3e', side: 'left' },
+                yaxis2: { title: 'Accuracy', gridcolor: '#2a2a3e', overlaying: 'y', side: 'right' }
+            });
+
+            const posSimTrace = {
+                x: trainingData.epochs,
+                y: trainingData.posSim,
+                name: 'Positive',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#4ade80', width: 2 },
+                marker: { size: 6 }
+            };
+
+            const negSimTrace = {
+                x: trainingData.epochs,
+                y: trainingData.negSim,
+                name: 'Negative',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#667eea', width: 2 },
+                marker: { size: 6 }
+            };
+
+            Plotly.react('similarity-chart', [posSimTrace, negSimTrace], similarityLayout);
+        }
+
+        // Control functions
+        function startTraining() {
+            console.log('🚀 Start training button clicked');
+
+            // Collect form values
+            const config = {
+                data_dir: document.getElementById('data_dir').value,
+                num_epochs: parseInt(document.getElementById('num_epochs').value),
+                batch_size: parseInt(document.getElementById('batch_size').value),
+                lr: parseFloat(document.getElementById('lr').value),
+                num_slots: parseInt(document.getElementById('num_slots').value),
+                slot_dim: parseInt(document.getElementById('slot_dim').value),
+                embedding_dim: parseInt(document.getElementById('embedding_dim').value),
+                encoder_feature_dim: parseInt(document.getElementById('encoder_feature_dim').value),
+                encoder_hidden_dim: parseInt(document.getElementById('encoder_hidden_dim').value),
+                num_iterations: parseInt(document.getElementById('num_iterations').value),
+                temperature: parseFloat(document.getElementById('temperature').value),
+                momentum: parseFloat(document.getElementById('momentum').value),
+                num_negatives: parseInt(document.getElementById('num_negatives').value),
+                batch_log_interval: parseInt(document.getElementById('batch_log_interval').value),
+                checkpoint_dir: document.getElementById('checkpoint_dir').value,
+                save_every: parseInt(document.getElementById('save_every').value)
+            };
+
+            console.log('📝 Config:', config);
+
+            // Validate required fields
+            if (!config.data_dir) {
+                alert('Please enter a data directory');
+                return;
+            }
+
+            // Optimistically update UI to reflect starting state
+            try {
+                const statusEl = document.getElementById('status');
+                statusEl.textContent = 'Starting...';
+                statusEl.className = 'status running';
+                updateButtons('running');
+            } catch (e) {
+                console.warn('Could not optimistically update status/buttons:', e);
+            }
+
+            // Send to backend
+            console.log('📤 Sending start request to backend...');
+            fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(res => {
+                console.log('📥 Response status:', res.status);
+                return res.json();
+            })
+            .then(data => {
+                console.log('📥 Response data:', data);
+                if (data.error) {
+                    console.error('❌ Error:', data.error);
+                    alert('Error starting training: ' + data.error);
+                    // Revert buttons if start failed
+                    updateButtons('idle');
+                } else {
+                    console.log('✓ Training started successfully:', data);
+                }
+            })
+            .catch(err => {
+                console.error('❌ Fetch error:', err);
+                alert('Failed to start training. Check console for details.');
+                // Revert buttons if request failed
+                updateButtons('idle');
+            });
+        }
+
+        function pauseTraining() {
+            fetch('/api/pause', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    console.log('Training paused:', data);
+                    if (data && !data.error) {
+                        // Ask backend for full, up-to-date state
+                        pollState();
+                    }
+                })
+                .catch(err => console.error('Error pausing training:', err));
+        }
+
+        function stopTraining() {
+            if (confirm('Are you sure you want to stop training? Progress will be saved.')) {
+                fetch('/api/stop', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        console.log('Training stopped:', data);
+                        if (data && !data.error) {
+                            // Ask backend for full, up-to-date state
+                            pollState();
+                        }
+                    })
+                    .catch(err => console.error('Error stopping training:', err));
+            }
+        }
+
+        // Update button states based on status
+        function updateButtons(status) {
+            const btnStart = document.getElementById('btn-start');
+            const btnPause = document.getElementById('btn-pause');
+            const btnStop = document.getElementById('btn-stop');
+
+            console.log('Updating buttons for status:', status);
+
+            if (status === 'idle' || status === 'stopped' || status === 'completed') {
+                btnStart.disabled = false;
+                btnStart.textContent = status === 'stopped' || status === 'completed' ? '▶ Start New Training' : '▶ Start Training';
+                btnPause.disabled = true;
+                btnStop.disabled = true;
+            } else if (status === 'running') {
+                btnStart.disabled = true;
+                btnPause.disabled = false;
+                btnPause.textContent = '⏸ Pause';
+                btnStop.disabled = false;
+            } else if (status === 'paused') {
+                btnStart.disabled = false;
+                btnStart.textContent = '▶ Resume';
+                btnPause.disabled = true;
+                btnStop.disabled = false;
+            }
+        }
+
+        // Update UI
+        function updateUI(state) {
+            // Status
+            const statusEl = document.getElementById('status');
+            const statusText = {
+                'idle': 'Ready',
+                'running': 'Running',
+                'paused': 'Paused',
+                'stopped': 'Stopped',
+                'completed': 'Completed'
+            }[state.status] || 'Unknown';
+
+            const statusClass = {
+                'idle': 'stopped',
+                'running': 'running',
+                'paused': 'paused',
+                'stopped': 'stopped',
+                'completed': 'running'
+            }[state.status] || 'stopped';
+
+            statusEl.textContent = statusText;
+            statusEl.className = `status ${statusClass}`;
+
+            // Update buttons
+            updateButtons(state.status);
+
+            // Toggle form/config display based on status
+            const formContainer = document.getElementById('config-form-container');
+            const configDisplay = document.getElementById('config-display');
+            if (state.status === 'idle') {
+                formContainer.style.display = 'block';
+                configDisplay.style.display = 'none';
+            } else {
+                formContainer.style.display = 'none';
+                configDisplay.style.display = 'block';
+            }
+
+            // Progress
+            const progress = state.total_epochs > 0 ? (state.current_epoch / state.total_epochs * 100) : 0;
+            document.getElementById('current-epoch').textContent = `${state.current_epoch} / ${state.total_epochs}`;
+            document.getElementById('progress-fill').style.width = `${progress}%`;
+            document.getElementById('progress-fill').textContent = `${progress.toFixed(1)}%`;
+
+            // Current metrics
+            if (state.metrics && state.metrics.epochs.length > 0) {
+                const idx = state.metrics.epochs.length - 1;
+                document.getElementById('current-loss').textContent = state.metrics.train_loss[idx].toFixed(4);
+                document.getElementById('current-accuracy').textContent = (state.metrics.train_accuracy[idx] * 100).toFixed(2) + '%';
+                document.getElementById('current-pos-sim').textContent = state.metrics.positive_similarity[idx].toFixed(4);
+                document.getElementById('current-neg-sim').textContent = state.metrics.negative_similarity[idx].toFixed(4);
+            }
+
+            // Config
+            if (Object.keys(state.config).length > 0) {
+                const configGrid = document.getElementById('config-grid');
+                configGrid.innerHTML = '';
+                for (const [key, value] of Object.entries(state.config)) {
+                    const item = document.createElement('div');
+                    item.className = 'config-item';
+                    item.innerHTML = `
+                        <div class="config-key">${key}</div>
+                        <div class="config-value">${value}</div>
+                    `;
+                    configGrid.appendChild(item);
+                }
+            }
+        }
+
+        // Expose control functions on window to be safe across browsers
+        window.startTraining = startTraining;
+        window.pauseTraining = pauseTraining;
+        window.stopTraining = stopTraining;
+
+        // Fallback: periodically poll backend state so UI/graphs update
+        async function pollState() {
+            try {
+                const res = await fetch('/api/state');
+                if (!res.ok) return;
+                const state = await res.json();
+                updateUI(state);
+                // Keep charts step-based and driven by live updates; don't
+                // rebuild from epoch-level history here.
+            } catch (err) {
+                console.error('Error polling /api/state:', err);
+            }
+        }
+
+        // Poll every 5 seconds to keep UI in sync even if websockets misbehave
+        setInterval(pollState, 5000);
+
+        // Socket events
+        socket.on('initial_state', (state) => {
+            console.log('📡 Initial state received:', state);
+            updateUI(state);
+
+            // Reset step-based training data; we'll fill it from live updates
+            trainingData.epochs = [];
+            trainingData.loss = [];
+            trainingData.accuracy = [];
+            trainingData.posSim = [];
+            trainingData.negSim = [];
+            globalStep = 0;
+            console.log('📊 Reset charts; will populate based on batch updates');
+            updateCharts();
+        });
+
+        socket.on('epoch_complete', (data) => {
+            console.log('✓ Epoch complete:', data);
+            // We keep the charts step-based and updated via batch events,
+            // so we only refresh the rest of the UI here.
+            updateUI(data.state);
+        });
+
+        socket.on('batch_update', (data) => {
+            // Update current batch info and live graphs within an epoch
+            console.log(`⚙️ Batch ${data.batch}/${data.total_batches} (epoch ${data.epoch}) - Loss: ${data.loss.toFixed(4)}`);
+
+            const totalBatches = data.total_batches || 1;
+            const totalEpochs = data.total_epochs || 1;
+
+            // Use global step index as x-axis
+            globalStep += 1;
+            const x = globalStep;
+
+            trainingData.epochs.push(x);
+            trainingData.loss.push(data.loss);
+            trainingData.accuracy.push(data.accuracy);
+            if (typeof data.avg_positive_sim === 'number') {
+                trainingData.posSim.push(data.avg_positive_sim);
+            }
+            if (typeof data.avg_negative_sim === 'number') {
+                trainingData.negSim.push(data.avg_negative_sim);
+            }
+
+            // Update "Current Metrics" card live
+            document.getElementById('current-loss').textContent = data.loss.toFixed(4);
+            document.getElementById('current-accuracy').textContent = (data.accuracy * 100).toFixed(2) + '%';
+            if (typeof data.avg_positive_sim === 'number') {
+                document.getElementById('current-pos-sim').textContent = data.avg_positive_sim.toFixed(4);
+            }
+            if (typeof data.avg_negative_sim === 'number') {
+                document.getElementById('current-neg-sim').textContent = data.avg_negative_sim.toFixed(4);
+            }
+
+            // Update progress within epoch
+            const epochProgress = totalEpochs > 0
+                ? ((data.epoch - 1) + data.batch / totalBatches) / totalEpochs * 100
+                : 0;
+            document.getElementById('current-epoch').textContent =
+                `${data.epoch} / ${totalEpochs} (batch ${data.batch}/${totalBatches})`;
+            document.getElementById('progress-fill').style.width = `${epochProgress}%`;
+            document.getElementById('progress-fill').textContent = `${epochProgress.toFixed(1)}%`;
+
+            // Redraw charts with latest batch data
+            updateCharts();
+        });
+
+        socket.on('status_changed', (state) => {
+            console.log('🔄 Status changed:', state.status);
+            updateUI(state);
+        });
+
+        socket.on('training_completed', (state) => {
+            console.log('🎉 Training completed!');
+            updateUI(state);
+            alert('Training completed! Check your checkpoints directory for saved models.');
+        });
+    </script>
+</body>
+</html>
