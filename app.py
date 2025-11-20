@@ -103,15 +103,24 @@ def initialize_training(config):
     # Validate that we have enough puzzles for the number of negative samples
     num_unique_grids = len(dataset.puzzle_identifiers)
     num_negatives = config['num_negatives']
+    batch_size = config['batch_size']
 
-    if num_unique_grids <= num_negatives:
+    # In the worst case, a batch could contain batch_size unique grids
+    # After excluding them, we need at least num_negatives grids left
+    min_required_grids = num_negatives + batch_size
+
+    if num_unique_grids < min_required_grids:
         raise ValueError(
-            f"Number of unique puzzles ({num_unique_grids}) must be greater than "
-            f"number of negative samples ({num_negatives}). "
-            f"Please either increase max_puzzles or decrease num_negatives."
+            f"Number of unique puzzles ({num_unique_grids}) must be at least "
+            f"num_negatives + batch_size = {num_negatives} + {batch_size} = {min_required_grids}. "
+            f"This ensures there are enough grids to sample negatives from after excluding the batch. "
+            f"Please either:\n"
+            f"  - Increase max_puzzles to at least {min_required_grids}\n"
+            f"  - Decrease num_negatives (currently {num_negatives})\n"
+            f"  - Decrease batch_size (currently {batch_size})"
         )
 
-    print(f"✓ Validation passed: {num_unique_grids} puzzles > {num_negatives} negative samples")
+    print(f"✓ Validation passed: {num_unique_grids} puzzles >= {num_negatives} negatives + {batch_size} batch_size")
 
     dataloader = DataLoader(
         dataset,

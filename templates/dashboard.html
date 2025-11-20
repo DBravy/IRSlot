@@ -1133,6 +1133,27 @@
 
         socket.on('status_changed', (state) => {
             console.log('🔄 Status changed:', state.status);
+
+            // If status is 'running' and metrics are empty, we're starting fresh training
+            // Clear chart data to avoid connecting old data to new data
+            if (state.status === 'running' &&
+                state.metrics &&
+                state.metrics.epochs &&
+                state.metrics.epochs.length === 0) {
+                console.log('🔄 Fresh training start detected - clearing chart data');
+                trainingData.epochs = [];
+                trainingData.loss = [];
+                trainingData.accuracy = [];
+                trainingData.posSim = [];
+                trainingData.negSim = [];
+                globalStep = 0;
+                chartsInitialized = false;
+
+                // Clear the charts visually
+                Plotly.newPlot('loss-accuracy-chart', [], lossAccuracyLayout);
+                Plotly.newPlot('similarity-chart', [], similarityLayout);
+            }
+
             updateUI(state);
         });
 

@@ -85,6 +85,15 @@ class MemoryBank(nn.Module):
             mask[exclude_ids] = False
             valid_indices = torch.where(mask)[0]
 
+            # Check if we have any valid indices
+            if len(valid_indices) == 0:
+                raise RuntimeError(
+                    f"Cannot sample {num_negatives} negatives: no valid grids left after excluding "
+                    f"{len(exclude_ids)} grids from a total of {self.num_grids} grids. "
+                    f"This likely means your batch size is too large relative to the number of unique puzzles. "
+                    f"Try reducing batch_size or increasing max_puzzles."
+                )
+
             # Sample from valid indices
             if len(valid_indices) < num_negatives:
                 # If not enough valid indices, sample with replacement
