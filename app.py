@@ -207,6 +207,112 @@ def generate_attention_visualizations(grids, attn_weights, original_shapes, num_
     return visualizations
 
 
+def generate_reconstruction_visualizations(input_grids, pred_grids, target_grids, original_shapes, num_samples=2):
+    """
+    Generate reconstruction visualizations showing input, prediction, and target grids.
+
+    Args:
+        input_grids: [B, H, W] - Input test grids (padded)
+        pred_grids: [B, H, W] - Predicted output grids (padded)
+        target_grids: [B, H, W] - Ground truth output grids (padded)
+        original_shapes: List of (H, W) tuples for original (non-padded) sizes
+        num_samples: Number of samples to visualize from batch
+
+    Returns:
+        List of base64-encoded PNG images
+    """
+    # ARC color palette (0-9)
+    ARC_COLORS = [
+        '#000000',  # 0: black
+        '#0074D9',  # 1: blue
+        '#FF4136',  # 2: red
+        '#2ECC40',  # 3: green
+        '#FFDC00',  # 4: yellow
+        '#AAAAAA',  # 5: gray
+        '#F012BE',  # 6: magenta
+        '#FF851B',  # 7: orange
+        '#7FDBFF',  # 8: sky blue
+        '#870C25',  # 9: dark red
+    ]
+
+    visualizations = []
+    B = input_grids.shape[0]
+
+    # Convert to numpy and move to CPU
+    input_np = input_grids.detach().cpu().numpy()
+    pred_np = pred_grids.detach().cpu().numpy()
+    target_np = target_grids.detach().cpu().numpy()
+
+    # Take only num_samples from the batch
+    num_samples = min(num_samples, B)
+
+    for batch_idx in range(num_samples):
+        input_grid = input_np[batch_idx]
+        pred_grid = pred_np[batch_idx]
+        target_grid = target_np[batch_idx]
+
+        # Get original (non-padded) dimensions
+        orig_H, orig_W = original_shapes[batch_idx]
+
+        # Crop to original size (remove padding)
+        input_grid = input_grid[:orig_H, :orig_W]
+        pred_grid = pred_grid[:orig_H, :orig_W]
+        target_grid = target_grid[:orig_H, :orig_W]
+
+        H, W = orig_H, orig_W
+
+        # Create figure with 3 columns: input, prediction, target
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+        # Helper function to render grid
+        def render_grid(grid, ax, title):
+            grid_img = np.zeros((H, W, 3))
+            for i in range(H):
+                for j in range(W):
+                    color_idx = int(grid[i, j])
+                    # Clamp to valid range [0, 9]
+                    color_idx = max(0, min(9, color_idx))
+                    color_hex = ARC_COLORS[color_idx]
+                    # Convert hex to RGB
+                    r = int(color_hex[1:3], 16) / 255.0
+                    g = int(color_hex[3:5], 16) / 255.0
+                    b = int(color_hex[5:7], 16) / 255.0
+                    grid_img[i, j] = [r, g, b]
+
+            ax.imshow(grid_img, interpolation='nearest')
+            ax.set_title(title, fontsize=12, color='white', fontweight='bold')
+            ax.axis('off')
+
+        # Plot all three grids
+        render_grid(input_grid, axes[0], 'Input')
+        render_grid(pred_grid, axes[1], 'Prediction')
+        render_grid(target_grid, axes[2], 'Target')
+
+        # Calculate accuracy for this sample
+        correct_pixels = np.sum(pred_grid == target_grid)
+        total_pixels = H * W
+        accuracy = correct_pixels / total_pixels * 100
+
+        # Add accuracy as super title
+        fig.suptitle(f'Sample {batch_idx + 1} - Accuracy: {accuracy:.1f}%',
+                     fontsize=14, color='white', fontweight='bold')
+
+        # Set dark background
+        fig.patch.set_facecolor('#1a1a2e')
+
+        # Convert to base64
+        buf = BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format='png', facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight')
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close(fig)
+
+        visualizations.append(img_base64)
+
+    return visualizations
+
+
 def initialize_training(config):
     """Initialize all training components from config."""
     print("Initializing training components...")
@@ -1155,6 +1261,95 @@ def train_arc_solver_epoch(epoch):
 
             except Exception as e:
                 print(f"Error generating attention viz: {e}")
+
+        # Generate reconstruction visualizations every 30 batches (skip first batch)
+        # Only run after training has started to avoid interference
+        if batch_idx > 0 and (batch_idx + 1) % 30 == 0:
+            try:
+                # Save current training state
+                was_training = model.training
+                model.eval()
+
+                with torch.no_grad():
+                    # Get test inputs and targets (detach to avoid any gradient tracking)
+                    test_inputs = batch['test_inputs'][:, 0].detach()  # [B, H, W] - first test example
+                    test_outputs = batch['test_outputs'][:, 0].detach()  # [B, H, W] - corresponding output
+                    test_shapes = [shape[0] for shape in batch['test_output_shapes']]  # List of (H, W)
+
+                    # Create a clean batch copy for visualization (avoid modifying training batch)
+                    viz_batch = {k: v.detach() if isinstance(v, torch.Tensor) else v
+                                 for k, v in batch.items()}
+
+                    # Generate predictions
+                    output = model.forward(viz_batch)
+
+                    # Handle dict output (model returns dict with 'predicted_grids' key)
+                    if isinstance(output, dict):
+                        # Try different possible keys
+                        predictions = output.get('predicted_grids',
+                                                output.get('predictions',
+                                                          output.get('logits', None)))
+                        if predictions is None:
+                            print(f"  WARNING: Could not find predictions in output dict. Keys: {output.keys()}")
+                            if was_training:
+                                model.train()
+                            continue
+                    else:
+                        predictions = output
+
+                    # Detach predictions to avoid any gradient tracking
+                    predictions = predictions.detach()
+
+                    # Handle different output formats
+                    if predictions.ndim == 4:
+                        if predictions.shape[-1] == 10:
+                            # [B, H, W, 10] format
+                            pred_classes = torch.argmax(predictions, dim=-1)  # [B, H, W]
+                        else:
+                            # [B, 10, H, W] format
+                            pred_classes = torch.argmax(predictions, dim=1)  # [B, H, W]
+                    elif predictions.ndim == 3:
+                        # [B, H, W] - already class predictions
+                        pred_classes = predictions
+                    else:
+                        print(f"  WARNING: Unexpected prediction shape: {predictions.shape}")
+                        if was_training:
+                            model.train()
+                        continue
+
+                    # Generate visualizations (2 samples from batch)
+                    vis_images = generate_reconstruction_visualizations(
+                        test_inputs,
+                        pred_classes,
+                        test_outputs,
+                        test_shapes,
+                        num_samples=2
+                    )
+
+                # Restore training state
+                if was_training:
+                    model.train()
+
+                # Calculate current step for visualization
+                viz_step = ((batch_idx + 1) // batch_log_interval) + (epoch - 1) * ((len(train_loader) + batch_log_interval - 1) // batch_log_interval)
+
+                print(f"Emitting {len(vis_images)} reconstruction visualizations...")
+                socketio.emit('reconstruction_update', {
+                    'epoch': epoch,
+                    'batch': batch_idx + 1,
+                    'step': viz_step,
+                    'images': vis_images
+                }, namespace=arc_solver_namespace)
+                socketio.sleep(0.001)
+                print(f"✓ Reconstruction visualizations sent")
+
+            except Exception as e:
+                print(f"Error generating reconstruction viz: {e}")
+                import traceback
+                traceback.print_exc()
+                # Make sure to restore training mode even on error
+                if 'was_training' in locals() and was_training:
+                    model.train()
 
     avg_loss = total_loss / num_batches
     avg_accuracy = total_accuracy / num_batches

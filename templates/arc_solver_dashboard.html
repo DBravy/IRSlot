@@ -488,6 +488,18 @@
         </div>
     </div>
 
+    <div class="chart-container">
+        <h2 style="color: #FF851B; margin-bottom: 15px;">
+            Reconstruction Attempts
+            <span style="font-size: 0.8em; color: #888; font-weight: normal;">(Shows model's attempted solutions)</span>
+        </h2>
+        <div id="reconstruction-info" style="color: #888; margin-bottom: 15px; font-size: 0.9em;">
+            Waiting for reconstructions...
+        </div>
+        <div id="reconstruction-visualizations" style="display: grid; grid-template-columns: 1fr; gap: 15px;">
+        </div>
+    </div>
+
     <script>
         console.log('ARC Solver Dashboard loading...');
         const socket = io('/arc_solver');
@@ -892,6 +904,33 @@
                 const label = document.createElement('div');
                 label.style.cssText = 'color: #888; font-size: 0.85em; margin-top: 8px; text-align: center;';
                 label.textContent = `Sample ${idx + 1}`;
+
+                imgWrapper.appendChild(img);
+                imgWrapper.appendChild(label);
+                container.appendChild(imgWrapper);
+            });
+        });
+
+        socket.on('reconstruction_update', (data) => {
+            console.log('Reconstruction update:', data);
+
+            const infoEl = document.getElementById('reconstruction-info');
+            infoEl.textContent = `Epoch ${data.epoch}, Batch ${data.batch}, Step ${data.step}`;
+
+            const container = document.getElementById('reconstruction-visualizations');
+            container.innerHTML = '';
+
+            data.images.forEach((imgBase64, idx) => {
+                const imgWrapper = document.createElement('div');
+                imgWrapper.style.cssText = 'background: #252538; padding: 10px; border-radius: 8px;';
+
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${imgBase64}`;
+                img.style.cssText = 'width: 100%; height: auto; border-radius: 5px;';
+
+                const label = document.createElement('div');
+                label.style.cssText = 'color: #888; font-size: 0.85em; margin-top: 8px; text-align: center;';
+                label.textContent = `Reconstruction ${idx + 1}`;
 
                 imgWrapper.appendChild(img);
                 imgWrapper.appendChild(label);
