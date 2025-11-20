@@ -50,7 +50,13 @@ class ARCInstanceDataset(Dataset):
             print(f"Limiting dataset to {max_puzzles} puzzles (out of {len(self.puzzle_identifiers)} available)")
 
             # Keep only the first max_puzzles
-            self.puzzle_identifiers = self.puzzle_identifiers[:max_puzzles]
+            old_puzzle_ids = self.puzzle_identifiers[:max_puzzles]
+
+            # Create a mapping from old puzzle IDs to new sequential IDs (0, 1, 2, ..., max_puzzles-1)
+            self.id_mapping = {old_id: new_id for new_id, old_id in enumerate(old_puzzle_ids)}
+
+            # Update puzzle_identifiers to be sequential
+            self.puzzle_identifiers = np.arange(max_puzzles, dtype=self.puzzle_identifiers.dtype)
 
             # Find the index range that corresponds to these puzzles
             # puzzle_indices[i] is the starting index for puzzle i
@@ -66,6 +72,9 @@ class ARCInstanceDataset(Dataset):
 
             # Update puzzle_indices
             self.puzzle_indices = self.puzzle_indices[:max_puzzles + 1]
+        else:
+            # No limiting, no remapping needed
+            self.id_mapping = None
 
         # Setup augmentation
         self.augment = augment
