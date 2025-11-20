@@ -452,6 +452,10 @@
         <h2 style="color: #667eea; margin-bottom: 15px;">
             Attention Masks
             <span style="font-size: 0.8em; color: #888; font-weight: normal;">(Updated every 20 batches)</span>
+            <button class="btn btn-pause" id="btn-toggle-attention-viz" onclick="toggleAttentionViz()" 
+                    style="padding: 8px 16px; font-size: 0.8em; margin-left: 15px;">
+                ⏸ Pause Updates
+            </button>
         </h2>
         <div id="attention-info" style="color: #888; margin-bottom: 15px; font-size: 0.9em;">
             Waiting for visualizations...
@@ -839,6 +843,30 @@
             }
         }
 
+        function toggleAttentionViz() {
+            console.log('🎨 Toggle attention visualization pause');
+            fetch('/api/toggle_attention_viz', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    console.log('Attention viz toggle response:', data);
+                    if (data && !data.error) {
+                        updateAttentionVizButton(data.paused);
+                    }
+                })
+                .catch(err => console.error('Error toggling attention viz:', err));
+        }
+
+        function updateAttentionVizButton(paused) {
+            const btn = document.getElementById('btn-toggle-attention-viz');
+            if (paused) {
+                btn.textContent = '▶ Resume Updates';
+                btn.className = 'btn btn-start';
+            } else {
+                btn.textContent = '⏸ Pause Updates';
+                btn.className = 'btn btn-pause';
+            }
+        }
+
         // Update button states based on status
         function updateButtons(status) {
             const btnStart = document.getElementById('btn-start');
@@ -945,6 +973,7 @@
         window.pauseTraining = pauseTraining;
         window.stopTraining = stopTraining;
         window.saveConfiguration = saveConfiguration;
+        window.toggleAttentionViz = toggleAttentionViz;
 
         // Add event listeners to form inputs to track changes
         function setupFormChangeTracking() {
@@ -1038,6 +1067,11 @@
         socket.on('initial_state', (state) => {
             console.log('📡 Initial state received:', state);
             updateUI(state);
+
+            // Update attention visualization button state
+            if (typeof state.attention_viz_paused !== 'undefined') {
+                updateAttentionVizButton(state.attention_viz_paused);
+            }
 
             // Reset training data
             trainingData.epochs = [];
@@ -1206,6 +1240,11 @@
             });
 
             console.log('✓ Attention visualizations updated');
+        });
+
+        socket.on('attention_viz_state_changed', (data) => {
+            console.log(`🎨 Attention visualization state changed: paused=${data.paused}`);
+            updateAttentionVizButton(data.paused);
         });
     </script>
 </body>

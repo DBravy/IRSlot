@@ -54,6 +54,7 @@ training_state = {
     # Use None so JSON serialization never chokes on inf/NaN
     'best_loss': None,
     'config_saved': False,  # Track if configuration has been saved
+    'attention_viz_paused': False,  # Track if attention visualizations are paused
 }
 
 # Saved configuration (separate from training_state to persist across sessions)
@@ -415,31 +416,35 @@ def train_epoch(epoch):
 
         # Generate and send attention visualizations every 20 batches
         if batch_idx == 0 or (batch_idx + 1) % 20 == 0:
-            try:
-                print(f"Generating attention visualizations at batch {batch_idx + 1}...")
-                # Forward pass with attention weights
-                with torch.no_grad():
-                    _, _, attn_weights = model(grids, return_attn=True)
+            # Only generate and send if not paused
+            if not training_state['attention_viz_paused']:
+                try:
+                    print(f"Generating attention visualizations at batch {batch_idx + 1}...")
+                    # Forward pass with attention weights
+                    with torch.no_grad():
+                        _, _, attn_weights = model(grids, return_attn=True)
 
-                # Get original shapes from batch
-                original_shapes = batch.get('original_shapes', [(grids.shape[1], grids.shape[2])] * grids.shape[0])
+                    # Get original shapes from batch
+                    original_shapes = batch.get('original_shapes', [(grids.shape[1], grids.shape[2])] * grids.shape[0])
 
-                # Generate visualizations (3 samples from batch)
-                vis_images = generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3)
+                    # Generate visualizations (3 samples from batch)
+                    vis_images = generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3)
 
-                print(f"Emitting {len(vis_images)} attention visualizations...")
-                socketio.emit('attention_update', {
-                    'epoch': epoch,
-                    'batch': batch_idx + 1,
-                    'step': training_state['global_step'],
-                    'images': vis_images
-                })
-                socketio.sleep(0.001)
-                print(f"✓ Attention visualizations sent")
-            except Exception as e:
-                print(f"ERROR: Failed to generate/emit attention visualizations: {e}")
-                import traceback
-                traceback.print_exc()
+                    print(f"Emitting {len(vis_images)} attention visualizations...")
+                    socketio.emit('attention_update', {
+                        'epoch': epoch,
+                        'batch': batch_idx + 1,
+                        'step': training_state['global_step'],
+                        'images': vis_images
+                    })
+                    socketio.sleep(0.001)
+                    print(f"✓ Attention visualizations sent")
+                except Exception as e:
+                    print(f"ERROR: Failed to generate/emit attention visualizations: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"Attention visualizations paused at batch {batch_idx + 1}")
 
     # Compute epoch metrics
     avg_loss = total_loss / num_batches
@@ -733,6 +738,21 @@ def api_stop():
         socketio.emit('status_changed', get_training_state())
         return jsonify({'status': 'stopped'})
     return jsonify({'error': 'Training not active'}), 400
+
+
+@app.route('/api/toggle_attention_viz', methods=['POST'])
+def api_toggle_attention_viz():
+    """Toggle attention visualization pause state."""
+    training_state['attention_viz_paused'] = not training_state['attention_viz_paused']
+    new_state = training_state['attention_viz_paused']
+    print(f"Attention visualization {'paused' if new_state else 'resumed'}")
+    socketio.emit('attention_viz_state_changed', {
+        'paused': new_state
+    })
+    return jsonify({
+        'paused': new_state,
+        'message': 'Attention visualizations ' + ('paused' if new_state else 'resumed')
+    })
 
 
 @socketio.on('connect')
