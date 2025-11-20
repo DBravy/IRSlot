@@ -186,9 +186,8 @@ def generate_attention_visualizations(grids, attn_weights, original_shapes, num_
         for slot_idx in range(num_slots):
             mask = attn[slot_idx]  # [H, W]
 
-            # Show attention as heatmap overlaid on grid
-            axes[slot_idx + 1].imshow(grid_img, interpolation='nearest', alpha=0.5)
-            im = axes[slot_idx + 1].imshow(mask, cmap='hot', interpolation='nearest', alpha=0.7)
+            # Show pure attention heatmap (no grid overlay)
+            im = axes[slot_idx + 1].imshow(mask, cmap='hot', interpolation='nearest')
             axes[slot_idx + 1].set_title(f'Slot {slot_idx}', fontsize=10, color='white')
             axes[slot_idx + 1].axis('off')
 
