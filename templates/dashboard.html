@@ -271,9 +271,42 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+
+        .nav {
+            background: #1a1a2e;
+            padding: 15px 25px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .nav a {
+            color: #667eea;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 5px;
+            transition: all 0.3s;
+        }
+
+        .nav a:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .nav a.active {
+            background: #667eea;
+            color: white;
+        }
     </style>
 </head>
 <body>
+    <div class="nav">
+        <a href="/" class="active">Instance Recognition</a>
+        <a href="/arc_solver">ARC Puzzle Solver</a>
+    </div>
+
     <div class="header">
         <h1>🎯 Slot Attention Training Dashboard</h1>
         <div class="subtitle">
@@ -439,12 +472,22 @@
     </div>
 
     <div class="chart-container">
-        <h2 style="color: #667eea; margin-bottom: 15px;">Loss & Accuracy</h2>
+        <h2 style="color: #667eea; margin-bottom: 15px;">
+            Loss & Accuracy
+            <span style="font-size: 0.7em; color: #888; font-weight: normal; margin-left: 10px;">
+                (X-axis: Steps, where 1 step = data averaged over batch_log_interval batches)
+            </span>
+        </h2>
         <div id="loss-accuracy-chart"></div>
     </div>
 
     <div class="chart-container">
-        <h2 style="color: #667eea; margin-bottom: 15px;">Similarity Scores</h2>
+        <h2 style="color: #667eea; margin-bottom: 15px;">
+            Similarity Scores
+            <span style="font-size: 0.7em; color: #888; font-weight: normal; margin-left: 10px;">
+                (X-axis: Steps, where 1 step = data averaged over batch_log_interval batches)
+            </span>
+        </h2>
         <div id="similarity-chart"></div>
     </div>
 
@@ -482,15 +525,12 @@
         });
 
         let trainingData = {
-            epochs: [],  // used as generic x-axis (we'll treat these as steps)
+            epochs: [],  // x-axis: step numbers (1 step = batch_log_interval batches, default 10)
             loss: [],
             accuracy: [],
             posSim: [],
             negSim: []
         };
-
-        // Global step counter for x-axis
-        let globalStep = 0;
 
         // Configuration state tracking
         let configSaved = false;
@@ -506,7 +546,7 @@
             paper_bgcolor: '#1a1a2e',
             plot_bgcolor: '#1a1a2e',
             font: { color: '#e0e0e0' },
-            xaxis: { title: 'Step', gridcolor: '#2a2a3e' },
+            xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
             yaxis: { title: 'Value', gridcolor: '#2a2a3e' },
             legend: { x: 0.1, y: 1.1, orientation: 'h' }
         };
@@ -515,7 +555,7 @@
             paper_bgcolor: '#1a1a2e',
             plot_bgcolor: '#1a1a2e',
             font: { color: '#e0e0e0' },
-            xaxis: { title: 'Step', gridcolor: '#2a2a3e' },
+            xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
             yaxis: { title: 'Similarity', gridcolor: '#2a2a3e' },
             legend: { x: 0.1, y: 1.1, orientation: 'h' }
         };
@@ -608,7 +648,7 @@
                     paper_bgcolor: '#1a1a2e',
                     plot_bgcolor: '#1a1a2e',
                     font: { color: '#e0e0e0' },
-                    xaxis: { title: 'Step', gridcolor: '#2a2a3e' },
+                    xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
                     yaxis: { title: 'Loss', gridcolor: '#2a2a3e', side: 'left' },
                     yaxis2: { title: 'Accuracy', gridcolor: '#2a2a3e', overlaying: 'y', side: 'right' },
                     legend: { x: 0.1, y: 1.1, orientation: 'h' }
@@ -642,7 +682,7 @@
                     paper_bgcolor: '#1a1a2e',
                     plot_bgcolor: '#1a1a2e',
                     font: { color: '#e0e0e0' },
-                    xaxis: { title: 'Step', gridcolor: '#2a2a3e' },
+                    xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
                     yaxis: { title: 'Similarity', gridcolor: '#2a2a3e' },
                     legend: { x: 0.1, y: 1.1, orientation: 'h' }
                 };
@@ -1073,45 +1113,14 @@
                 updateAttentionVizButton(state.attention_viz_paused);
             }
 
-            // Reset training data
+            // Reset training data (historical data will be populated via batch_update events)
             trainingData.epochs = [];
             trainingData.loss = [];
             trainingData.accuracy = [];
             trainingData.posSim = [];
             trainingData.negSim = [];
-            globalStep = state.global_step || 0;
 
-            // Load historical epoch-level data if available
-            if (state.metrics && state.metrics.epochs && state.metrics.epochs.length > 0) {
-                console.log(`📊 Loading ${state.metrics.epochs.length} historical epoch data points...`);
-
-                // Estimate steps per epoch based on config
-                const stepsPerEpoch = state.config?.dataset_size
-                    ? Math.ceil(state.config.dataset_size / (state.config?.batch_size || 1))
-                    : 100; // fallback estimate
-
-                // Populate with historical data
-                for (let i = 0; i < state.metrics.epochs.length; i++) {
-                    const epoch = state.metrics.epochs[i];
-                    const estimatedStep = epoch * stepsPerEpoch;
-
-                    trainingData.epochs.push(estimatedStep);
-                    trainingData.loss.push(state.metrics.train_loss[i] || 0);
-                    trainingData.accuracy.push(state.metrics.train_accuracy[i] || 0);
-                    trainingData.posSim.push(state.metrics.positive_similarity[i] || 0);
-                    trainingData.negSim.push(state.metrics.negative_similarity[i] || 0);
-                }
-
-                // Update global step to continue from where we are
-                if (state.metrics.epochs.length > 0) {
-                    const lastEpoch = state.metrics.epochs[state.metrics.epochs.length - 1];
-                    globalStep = Math.max(globalStep, lastEpoch * stepsPerEpoch);
-                }
-
-                console.log(`✓ Loaded historical data. Current step: ${globalStep}`);
-            } else {
-                console.log('📊 No historical data available. Starting fresh.');
-            }
+            console.log('📊 Chart data cleared. Waiting for batch updates...');
 
             updateCharts();
         });
@@ -1130,13 +1139,8 @@
             const totalBatches = data.total_batches || 1;
             const totalEpochs = data.total_epochs || 1;
 
-            // Use backend-provided global step if available, otherwise local counter
-            if (typeof data.step === 'number') {
-                globalStep = data.step;
-            } else {
-                globalStep += 1;
-            }
-            const x = globalStep;
+            // Use the step number directly from backend
+            const step = data.step;
 
             // Add new data point
             const loss = data.loss || 0;
@@ -1144,13 +1148,13 @@
             const posSim = data.avg_positive_sim || 0;
             const negSim = data.avg_negative_sim || 0;
 
-            trainingData.epochs.push(x);
+            trainingData.epochs.push(step);
             trainingData.loss.push(loss);
             trainingData.accuracy.push(accuracy);
             trainingData.posSim.push(posSim);
             trainingData.negSim.push(negSim);
 
-            console.log(`📊 Chart data point added: step=${x}, arrays length=${trainingData.epochs.length}`);
+            console.log(`📊 Chart data point added: step=${step}, arrays length=${trainingData.epochs.length}`);
 
             // Update "Current Metrics" card live
             document.getElementById('current-loss').textContent = loss.toFixed(4);
@@ -1163,12 +1167,12 @@
                 ? ((data.epoch - 1) + data.batch / totalBatches) / totalEpochs * 100
                 : 0;
             document.getElementById('current-epoch').textContent =
-                `${data.epoch} / ${totalEpochs} (batch ${data.batch}/${totalBatches})`;
+                `${data.epoch} / ${totalEpochs} (batch ${data.batch}/${totalBatches}, step ${step})`;
             document.getElementById('progress-fill').style.width = `${epochProgress}%`;
             document.getElementById('progress-fill').textContent = `${epochProgress.toFixed(1)}%`;
 
             // Use incremental chart update for better performance
-            extendCharts(x, loss, accuracy, posSim, negSim);
+            extendCharts(step, loss, accuracy, posSim, negSim);
 
             // Downsample if we have too many points
             if (trainingData.epochs.length > MAX_DATA_POINTS) {
@@ -1193,7 +1197,6 @@
                 trainingData.accuracy = [];
                 trainingData.posSim = [];
                 trainingData.negSim = [];
-                globalStep = 0;
                 chartsInitialized = false;
 
                 // Clear the charts visually

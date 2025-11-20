@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARC Solver Training Dashboard</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: #0f0f1e;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .nav {
+            background: #1a1a2e;
+            padding: 15px 25px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .nav a {
+            color: #667eea;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 5px;
+            transition: all 0.3s;
+        }
+
+        .nav a:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .nav a.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #F012BE 0%, #FF851B 100%);
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: white;
+        }
+
+        .subtitle {
+            color: rgba(255,255,255,0.9);
+            font-size: 1.1em;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: #1a1a2e;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            border: 1px solid #2a2a3e;
+        }
+
+        .card h2 {
+            color: #F012BE;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            border-bottom: 2px solid #F012BE;
+            padding-bottom: 10px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .stat {
+            background: #252538;
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 4px solid #F012BE;
+        }
+
+        .stat-label {
+            color: #888;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #e0e0e0;
+        }
+
+        .stat-value.good {
+            color: #4ade80;
+        }
+
+        .stat-value.bad {
+            color: #f87171;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            box-shadow: none;
+            filter: grayscale(0.6);
+        }
+
+        .btn-start {
+            background: #4ade80;
+            color: #0f0f1e;
+        }
+
+        .btn-pause {
+            background: #fbbf24;
+            color: #0f0f1e;
+        }
+
+        .btn-stop {
+            background: #f87171;
+            color: white;
+        }
+
+        .btn-save {
+            background: #F012BE;
+            color: white;
+        }
+
+        .config-status {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 15px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .config-status.saved {
+            background: #4ade80;
+            color: #0f0f1e;
+        }
+
+        .config-status.unsaved {
+            background: #fbbf24;
+            color: #0f0f1e;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9em;
+            margin-left: 15px;
+        }
+
+        .status.running {
+            background: #4ade80;
+            color: #0f0f1e;
+        }
+
+        .status.paused {
+            background: #fbbf24;
+            color: #0f0f1e;
+        }
+
+        .status.stopped {
+            background: #888;
+            color: white;
+        }
+
+        .chart-container {
+            background: #1a1a2e;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            border: 1px solid #2a2a3e;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px;
+        }
+
+        .config-item {
+            background: #252538;
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        .config-key {
+            color: #888;
+            font-size: 0.85em;
+        }
+
+        .config-value {
+            color: #e0e0e0;
+            font-weight: 600;
+            margin-top: 5px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #252538;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-top: 15px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #F012BE 0%, #FF851B 100%);
+            transition: width 0.5s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+        }
+
+        .form-label {
+            display: block;
+            color: #888;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 10px;
+            background: #252538;
+            border: 1px solid #2a2a3e;
+            border-radius: 5px;
+            color: #e0e0e0;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #F012BE;
+        }
+
+        .form-input:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="/">Instance Recognition</a>
+        <a href="/arc_solver" class="active">ARC Puzzle Solver</a>
+    </div>
+
+    <div class="header">
+        <h1>🧩 ARC Puzzle Solver Training</h1>
+        <div class="subtitle">
+            Train transformer-based reasoning for solving ARC puzzles
+            <span id="status" class="status stopped">Stopped</span>
+        </div>
+    </div>
+
+    <div class="card" id="config-card">
+        <h2>
+            Training Configuration
+            <span id="config-status" class="config-status unsaved">Unsaved</span>
+        </h2>
+        <div id="config-form-container">
+            <div style="margin-bottom: 15px;">
+                <button class="btn btn-save" id="btn-save-config" onclick="saveConfiguration()">
+                    💾 Save Configuration
+                </button>
+            </div>
+            <form id="config-form" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+                <div style="grid-column: 1 / -1;">
+                    <label class="form-label">Data Directory *</label>
+                    <select id="data_dir" class="form-input" required>
+                        <option value="kaggle/combined" selected>kaggle/combined</option>
+                        <option value="data/arc">data/arc</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="form-label">ARC Version</label>
+                    <select id="arc_version" class="form-input">
+                        <option value="agi1" selected>AGI-1</option>
+                        <option value="agi2">AGI-2</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="form-label">Number of Epochs</label>
+                    <input type="number" id="num_epochs" class="form-input" value="100">
+                </div>
+
+                <div>
+                    <label class="form-label">Batch Size</label>
+                    <input type="number" id="batch_size" class="form-input" value="4">
+                </div>
+
+                <div>
+                    <label class="form-label">Learning Rate</label>
+                    <input type="number" id="lr" class="form-input" value="0.0001" step="0.0001">
+                </div>
+
+                <div>
+                    <label class="form-label">Hidden Size</label>
+                    <input type="number" id="hidden_size" class="form-input" value="256">
+                </div>
+
+                <div>
+                    <label class="form-label">Number of Layers</label>
+                    <input type="number" id="num_layers" class="form-input" value="4">
+                </div>
+
+                <div>
+                    <label class="form-label">Number of Heads</label>
+                    <input type="number" id="num_heads" class="form-input" value="8">
+                </div>
+
+                <div>
+                    <label class="form-label">Number of Slots</label>
+                    <input type="number" id="num_slots" class="form-input" value="7">
+                </div>
+
+                <div>
+                    <label class="form-label">Slot Dimension</label>
+                    <input type="number" id="slot_dim" class="form-input" value="64">
+                </div>
+
+                <div>
+                    <label class="form-label">Slot Iterations</label>
+                    <input type="number" id="slot_iterations" class="form-input" value="3">
+                </div>
+
+                <div>
+                    <label class="form-label">Max Train Examples</label>
+                    <input type="number" id="max_train_examples" class="form-input" value="5">
+                </div>
+
+                <div>
+                    <label class="form-label">Subset Size (optional)</label>
+                    <input type="number" id="subset_size" class="form-input" placeholder="All puzzles">
+                </div>
+
+                <div>
+                    <label class="form-label">Checkpoint Directory</label>
+                    <input type="text" id="checkpoint_dir" class="form-input" value="checkpoints_arc_solver">
+                </div>
+
+                <div>
+                    <label class="form-label">Save Every N Epochs</label>
+                    <input type="number" id="save_every" class="form-input" value="10">
+                </div>
+
+                <div>
+                    <label class="form-label">Eval Every N Epochs</label>
+                    <input type="number" id="eval_every" class="form-input" value="5">
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="dashboard">
+        <div class="card">
+            <h2>Training Progress</h2>
+            <div class="stat">
+                <div class="stat-label">Epoch</div>
+                <div class="stat-value" id="current-epoch">0 / 0</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill" style="width: 0%">0%</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Current Metrics</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-label">Train Loss</div>
+                    <div class="stat-value" id="current-train-loss">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Train Accuracy</div>
+                    <div class="stat-value good" id="current-train-acc">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Val Loss</div>
+                    <div class="stat-value" id="current-val-loss">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Val Accuracy</div>
+                    <div class="stat-value good" id="current-val-acc">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Training Controls</h2>
+            <div class="controls">
+                <button class="btn btn-start" id="btn-start" onclick="startTraining()">
+                    ▶ Start Training
+                </button>
+                <button class="btn btn-pause" id="btn-pause" onclick="pauseTraining()" disabled>
+                    ⏸ Pause
+                </button>
+                <button class="btn btn-stop" id="btn-stop" onclick="stopTraining()" disabled>
+                    ⏹ Stop
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h2 style="color: #F012BE; margin-bottom: 15px;">Loss Over Time</h2>
+        <div id="loss-chart"></div>
+    </div>
+
+    <div class="chart-container">
+        <h2 style="color: #F012BE; margin-bottom: 15px;">Accuracy Over Time</h2>
+        <div id="accuracy-chart"></div>
+    </div>
+
+    <div class="chart-container">
+        <h2 style="color: #F012BE; margin-bottom: 15px;">
+            Attention Masks
+            <span style="font-size: 0.8em; color: #888; font-weight: normal;">(Updated during training)</span>
+        </h2>
+        <div id="attention-info" style="color: #888; margin-bottom: 15px; font-size: 0.9em;">
+            Waiting for visualizations...
+        </div>
+        <div id="attention-visualizations" style="display: grid; grid-template-columns: 1fr; gap: 15px;">
+        </div>
+    </div>
+
+    <script>
+        console.log('ARC Solver Dashboard loading...');
+        const socket = io('/arc_solver');
+
+        socket.on('connect', () => {
+            console.log('✓ Socket connected to /arc_solver namespace!');
+        });
+
+        socket.on('disconnect', () => {
+            console.log('✗ Socket disconnected!');
+        });
+
+        let trainingData = {
+            epochs: [],
+            train_loss: [],
+            train_accuracy: [],
+            val_loss: [],
+            val_accuracy: []
+        };
+
+        let configSaved = false;
+        let chartsInitialized = false;
+
+        // Initialize charts
+        const chartLayout = {
+            paper_bgcolor: '#1a1a2e',
+            plot_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' },
+            xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
+            yaxis: { title: 'Loss', gridcolor: '#2a2a3e' },
+            legend: { x: 0.1, y: 1.1, orientation: 'h' }
+        };
+
+        const accuracyLayout = {
+            paper_bgcolor: '#1a1a2e',
+            plot_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' },
+            xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
+            yaxis: { title: 'Accuracy', gridcolor: '#2a2a3e' },
+            legend: { x: 0.1, y: 1.1, orientation: 'h' }
+        };
+
+        Plotly.newPlot('loss-chart', [], chartLayout);
+        Plotly.newPlot('accuracy-chart', [], accuracyLayout);
+
+        function updateCharts() {
+            if (trainingData.epochs.length === 0) {
+                console.log('📊 No data to chart yet');
+                return;
+            }
+
+            console.log(`📊 Updating charts with ${trainingData.epochs.length} data points`);
+
+            const trainLossTrace = {
+                x: trainingData.epochs,
+                y: trainingData.train_loss,
+                name: 'Train Loss',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#f87171', width: 2 },
+                connectgaps: false
+            };
+
+            // Filter out null values for validation traces
+            const valLossX = [];
+            const valLossY = [];
+            for (let i = 0; i < trainingData.epochs.length; i++) {
+                if (trainingData.val_loss[i] !== null && trainingData.val_loss[i] !== undefined) {
+                    valLossX.push(trainingData.epochs[i]);
+                    valLossY.push(trainingData.val_loss[i]);
+                }
+            }
+
+            const valLossTrace = {
+                x: valLossX,
+                y: valLossY,
+                name: 'Val Loss',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#FF851B', width: 2 }
+            };
+
+            const trainAccTrace = {
+                x: trainingData.epochs,
+                y: trainingData.train_accuracy,
+                name: 'Train Accuracy',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#4ade80', width: 2 },
+                connectgaps: false
+            };
+
+            const valAccX = [];
+            const valAccY = [];
+            for (let i = 0; i < trainingData.epochs.length; i++) {
+                if (trainingData.val_accuracy[i] !== null && trainingData.val_accuracy[i] !== undefined) {
+                    valAccX.push(trainingData.epochs[i]);
+                    valAccY.push(trainingData.val_accuracy[i]);
+                }
+            }
+
+            const valAccTrace = {
+                x: valAccX,
+                y: valAccY,
+                name: 'Val Accuracy',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#2ECC40', width: 2 }
+            };
+
+            if (!chartsInitialized) {
+                console.log('📊 Initializing charts for the first time');
+                Plotly.newPlot('loss-chart', [trainLossTrace, valLossTrace], chartLayout);
+                Plotly.newPlot('accuracy-chart', [trainAccTrace, valAccTrace], accuracyLayout);
+                chartsInitialized = true;
+            } else {
+                Plotly.react('loss-chart', [trainLossTrace, valLossTrace], chartLayout);
+                Plotly.react('accuracy-chart', [trainAccTrace, valAccTrace], accuracyLayout);
+            }
+
+            console.log('✓ Charts updated successfully');
+        }
+
+        function getConfigFromForm() {
+            const config = {
+                data_dir: document.getElementById('data_dir').value,
+                arc_version: document.getElementById('arc_version').value,
+                num_epochs: parseInt(document.getElementById('num_epochs').value),
+                batch_size: parseInt(document.getElementById('batch_size').value),
+                lr: parseFloat(document.getElementById('lr').value),
+                hidden_size: parseInt(document.getElementById('hidden_size').value),
+                num_layers: parseInt(document.getElementById('num_layers').value),
+                num_heads: parseInt(document.getElementById('num_heads').value),
+                num_slots: parseInt(document.getElementById('num_slots').value),
+                slot_dim: parseInt(document.getElementById('slot_dim').value),
+                slot_iterations: parseInt(document.getElementById('slot_iterations').value),
+                max_train_examples: parseInt(document.getElementById('max_train_examples').value),
+                checkpoint_dir: document.getElementById('checkpoint_dir').value,
+                save_every: parseInt(document.getElementById('save_every').value),
+                eval_every: parseInt(document.getElementById('eval_every').value)
+            };
+
+            const subsetSize = document.getElementById('subset_size').value;
+            if (subsetSize && subsetSize.trim() !== '') {
+                config.subset_size = parseInt(subsetSize);
+            }
+
+            return config;
+        }
+
+        function updateConfigStatus(saved) {
+            configSaved = saved;
+            const statusEl = document.getElementById('config-status');
+            if (saved) {
+                statusEl.textContent = 'Saved ✓';
+                statusEl.className = 'config-status saved';
+            } else {
+                statusEl.textContent = 'Unsaved';
+                statusEl.className = 'config-status unsaved';
+            }
+        }
+
+        function saveConfiguration() {
+            const config = getConfigFromForm();
+            console.log('Saving config:', config);
+
+            fetch('/arc_solver/api/save_config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    updateConfigStatus(true);
+                    alert('Configuration saved!');
+                }
+            })
+            .catch(err => {
+                console.error('Error saving config:', err);
+                alert('Failed to save configuration');
+            });
+        }
+
+        function startTraining() {
+            if (!configSaved) {
+                alert('Please save configuration first');
+                return;
+            }
+
+            fetch('/arc_solver/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    console.log('Training started');
+                }
+            })
+            .catch(err => {
+                console.error('Error starting training:', err);
+                alert('Failed to start training');
+            });
+        }
+
+        function pauseTraining() {
+            fetch('/arc_solver/api/pause', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => console.log('Paused:', data))
+                .catch(err => console.error('Error:', err));
+        }
+
+        function stopTraining() {
+            if (confirm('Stop training?')) {
+                fetch('/arc_solver/api/stop', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => console.log('Stopped:', data))
+                    .catch(err => console.error('Error:', err));
+            }
+        }
+
+        function updateButtons(status) {
+            const btnStart = document.getElementById('btn-start');
+            const btnPause = document.getElementById('btn-pause');
+            const btnStop = document.getElementById('btn-stop');
+
+            if (status === 'idle' || status === 'stopped' || status === 'completed') {
+                btnStart.disabled = false;
+                btnPause.disabled = true;
+                btnStop.disabled = true;
+            } else if (status === 'running') {
+                btnStart.disabled = true;
+                btnPause.disabled = false;
+                btnStop.disabled = false;
+            } else if (status === 'paused') {
+                btnStart.disabled = false;
+                btnStart.textContent = '▶ Resume';
+                btnPause.disabled = true;
+                btnStop.disabled = false;
+            }
+        }
+
+        function updateUI(state) {
+            const statusEl = document.getElementById('status');
+            const statusText = {
+                'idle': 'Ready',
+                'running': 'Running',
+                'paused': 'Paused',
+                'stopped': 'Stopped',
+                'completed': 'Completed'
+            }[state.status] || 'Unknown';
+
+            const statusClass = {
+                'idle': 'stopped',
+                'running': 'running',
+                'paused': 'paused',
+                'stopped': 'stopped',
+                'completed': 'running'
+            }[state.status] || 'stopped';
+
+            statusEl.textContent = statusText;
+            statusEl.className = `status ${statusClass}`;
+
+            updateButtons(state.status);
+
+            const progress = state.total_epochs > 0 ? (state.current_epoch / state.total_epochs * 100) : 0;
+            document.getElementById('current-epoch').textContent = `${state.current_epoch} / ${state.total_epochs}`;
+            document.getElementById('progress-fill').style.width = `${progress}%`;
+            document.getElementById('progress-fill').textContent = `${progress.toFixed(1)}%`;
+
+            if (state.metrics && state.metrics.epochs.length > 0) {
+                const idx = state.metrics.epochs.length - 1;
+                document.getElementById('current-train-loss').textContent = state.metrics.train_loss[idx].toFixed(4);
+                document.getElementById('current-train-acc').textContent = (state.metrics.train_accuracy[idx] * 100).toFixed(2) + '%';
+                document.getElementById('current-val-loss').textContent = state.metrics.val_loss[idx].toFixed(4);
+                document.getElementById('current-val-acc').textContent = (state.metrics.val_accuracy[idx] * 100).toFixed(2) + '%';
+            }
+        }
+
+        window.startTraining = startTraining;
+        window.pauseTraining = pauseTraining;
+        window.stopTraining = stopTraining;
+        window.saveConfiguration = saveConfiguration;
+
+        // Socket events
+        socket.on('initial_state', (state) => {
+            console.log('Initial state:', state);
+            updateUI(state);
+
+            // Reset training data (will be populated via batch_update events)
+            trainingData = {
+                epochs: [],
+                train_loss: [],
+                train_accuracy: [],
+                val_loss: [],
+                val_accuracy: []
+            };
+
+            console.log('📊 Chart data cleared. Waiting for batch updates...');
+            updateCharts();
+        });
+
+        socket.on('batch_update', (data) => {
+            try {
+                console.log(`⚙️ Batch ${data.batch}/${data.total_batches} (epoch ${data.epoch}) - Loss: ${data.train_loss.toFixed(4)}, step ${data.step}`);
+                console.log('  Received data:', data);
+
+                // Use the step number directly from backend
+                const step = data.step;
+
+                // Add new data point
+                trainingData.epochs.push(step);
+                trainingData.train_loss.push(data.train_loss);
+                trainingData.train_accuracy.push(data.train_accuracy);
+                // Val metrics are only available at epoch_complete
+                trainingData.val_loss.push(null);
+                trainingData.val_accuracy.push(null);
+
+                console.log(`📊 Chart data point added: step=${step}, arrays length=${trainingData.epochs.length}`);
+                console.log('  Training data:', {
+                    epochs: trainingData.epochs.slice(-3),
+                    train_loss: trainingData.train_loss.slice(-3),
+                    train_accuracy: trainingData.train_accuracy.slice(-3)
+                });
+
+                // Update "Current Metrics" card live
+                document.getElementById('current-train-loss').textContent = data.train_loss.toFixed(4);
+                document.getElementById('current-train-acc').textContent = (data.train_accuracy * 100).toFixed(2) + '%';
+
+                // Update progress within epoch
+                const totalBatches = data.total_batches || 1;
+                const totalEpochs = data.total_epochs || 1;
+                const epochProgress = totalEpochs > 0
+                    ? ((data.epoch - 1) + data.batch / totalBatches) / totalEpochs * 100
+                    : 0;
+                document.getElementById('current-epoch').textContent =
+                    `${data.epoch} / ${totalEpochs} (batch ${data.batch}/${totalBatches}, step ${step})`;
+                document.getElementById('progress-fill').style.width = `${epochProgress}%`;
+                document.getElementById('progress-fill').textContent = `${epochProgress.toFixed(1)}%`;
+
+                // Update charts
+                console.log('  Calling updateCharts()...');
+                updateCharts();
+            } catch (error) {
+                console.error('❌ Error in batch_update handler:', error);
+                console.error('  Stack trace:', error.stack);
+            }
+        });
+
+        socket.on('epoch_complete', (data) => {
+            console.log('✓ Epoch complete:', data);
+            updateUI(data.state);
+
+            // Update validation metrics (train metrics already updated by batch_update)
+            // Find the last entry and update it with validation metrics
+            if (trainingData.epochs.length > 0) {
+                const lastIdx = trainingData.epochs.length - 1;
+                trainingData.val_loss[lastIdx] = data.metrics.val_loss;
+                trainingData.val_accuracy[lastIdx] = data.metrics.val_accuracy;
+            }
+
+            // Update val metrics display
+            document.getElementById('current-val-loss').textContent = data.metrics.val_loss.toFixed(4);
+            document.getElementById('current-val-acc').textContent = (data.metrics.val_accuracy * 100).toFixed(2) + '%';
+
+            updateCharts();
+        });
+
+        socket.on('status_changed', (state) => {
+            console.log('Status changed:', state.status);
+            updateUI(state);
+        });
+
+        socket.on('training_completed', (state) => {
+            console.log('Training completed!');
+            updateUI(state);
+            alert('Training completed!');
+        });
+
+        socket.on('attention_update', (data) => {
+            console.log('Attention update:', data);
+
+            const infoEl = document.getElementById('attention-info');
+            infoEl.textContent = `Epoch ${data.epoch}, Batch ${data.batch}, Step ${data.step}`;
+
+            const container = document.getElementById('attention-visualizations');
+            container.innerHTML = '';
+
+            data.images.forEach((imgBase64, idx) => {
+                const imgWrapper = document.createElement('div');
+                imgWrapper.style.cssText = 'background: #252538; padding: 10px; border-radius: 8px;';
+
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${imgBase64}`;
+                img.style.cssText = 'width: 100%; height: auto; border-radius: 5px;';
+
+                const label = document.createElement('div');
+                label.style.cssText = 'color: #888; font-size: 0.85em; margin-top: 8px; text-align: center;';
+                label.textContent = `Sample ${idx + 1}`;
+
+                imgWrapper.appendChild(img);
+                imgWrapper.appendChild(label);
+                container.appendChild(imgWrapper);
+            });
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const formInputs = document.querySelectorAll('#config-form input, #config-form select');
+            formInputs.forEach(input => {
+                input.addEventListener('change', () => updateConfigStatus(false));
+            });
+        });
+    </script>
+</body>
+</html>
