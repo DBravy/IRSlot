@@ -363,6 +363,11 @@
                 </div>
 
                 <div>
+                    <label class="form-label">Max Puzzles (optional)</label>
+                    <input type="number" id="max_puzzles" class="form-input" placeholder="All puzzles">
+                </div>
+
+                <div>
                     <label class="form-label">Batch Log Interval</label>
                     <input type="number" id="batch_log_interval" class="form-input" value="10">
                 </div>
@@ -667,7 +672,7 @@
 
         // Control functions
         function getConfigFromForm() {
-            return {
+            const config = {
                 data_dir: document.getElementById('data_dir').value,
                 num_epochs: parseInt(document.getElementById('num_epochs').value),
                 batch_size: parseInt(document.getElementById('batch_size').value),
@@ -685,6 +690,14 @@
                 checkpoint_dir: document.getElementById('checkpoint_dir').value,
                 save_every: parseInt(document.getElementById('save_every').value)
             };
+
+            // Add max_puzzles if specified
+            const maxPuzzles = document.getElementById('max_puzzles').value;
+            if (maxPuzzles && maxPuzzles.trim() !== '') {
+                config.max_puzzles = parseInt(maxPuzzles);
+            }
+
+            return config;
         }
 
         function updateConfigStatus(saved) {

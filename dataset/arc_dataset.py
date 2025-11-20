@@ -18,7 +18,7 @@ class ARCInstanceDataset(Dataset):
     - grid: Augmented view of the grid [H, W]
     - original_shape: (H, W) before padding
     """
-    def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30):
+    def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30, max_puzzles=None):
         """
         Args:
             data_dir: Root directory containing the processed dataset
@@ -26,6 +26,7 @@ class ARCInstanceDataset(Dataset):
             subset: 'all' (default subset name from build_arc_dataset.py)
             augment: Whether to apply augmentations
             max_grid_size: Maximum grid dimension (default 30 for ARC)
+            max_puzzles: Maximum number of unique puzzles to load (None = all)
         """
         self.data_dir = data_dir
         self.split = split
@@ -43,6 +44,28 @@ class ARCInstanceDataset(Dataset):
         self.labels = np.load(f"{subset_path}labels.npy")
         self.puzzle_identifiers = np.load(f"{subset_path}puzzle_identifiers.npy")
         self.puzzle_indices = np.load(f"{subset_path}puzzle_indices.npy")
+
+        # Limit to max_puzzles if specified
+        if max_puzzles is not None and max_puzzles < len(self.puzzle_identifiers):
+            print(f"Limiting dataset to {max_puzzles} puzzles (out of {len(self.puzzle_identifiers)} available)")
+
+            # Keep only the first max_puzzles
+            self.puzzle_identifiers = self.puzzle_identifiers[:max_puzzles]
+
+            # Find the index range that corresponds to these puzzles
+            # puzzle_indices[i] is the starting index for puzzle i
+            # We want all examples from puzzle 0 to puzzle max_puzzles-1
+            if max_puzzles < len(self.puzzle_indices):
+                end_idx = self.puzzle_indices[max_puzzles]
+            else:
+                end_idx = len(self.inputs)
+
+            # Slice inputs and labels
+            self.inputs = self.inputs[:end_idx]
+            self.labels = self.labels[:end_idx]
+
+            # Update puzzle_indices
+            self.puzzle_indices = self.puzzle_indices[:max_puzzles + 1]
 
         # Setup augmentation
         self.augment = augment

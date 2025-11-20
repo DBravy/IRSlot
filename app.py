@@ -96,8 +96,22 @@ def initialize_training(config):
         split=config.get('split', 'train'),
         subset=config.get('subset', 'all'),
         augment=True,
-        max_grid_size=30
+        max_grid_size=30,
+        max_puzzles=config.get('max_puzzles', None)
     )
+
+    # Validate that we have enough puzzles for the number of negative samples
+    num_unique_grids = len(dataset.puzzle_identifiers)
+    num_negatives = config['num_negatives']
+
+    if num_unique_grids <= num_negatives:
+        raise ValueError(
+            f"Number of unique puzzles ({num_unique_grids}) must be greater than "
+            f"number of negative samples ({num_negatives}). "
+            f"Please either increase max_puzzles or decrease num_negatives."
+        )
+
+    print(f"✓ Validation passed: {num_unique_grids} puzzles > {num_negatives} negative samples")
 
     dataloader = DataLoader(
         dataset,
@@ -153,7 +167,7 @@ def initialize_training(config):
     training_state['total_epochs'] = config['num_epochs']
     training_state['total_batches'] = len(dataloader)
     training_state['global_step'] = 0
-    training_state['config'] = {
+    state_config = {
         'data_dir': config['data_dir'],
         'dataset_size': len(dataset),
         'unique_grids': num_unique_grids,
@@ -169,6 +183,12 @@ def initialize_training(config):
         'batch_log_interval': config.get('batch_log_interval', 10),
         'device': device,
     }
+
+    # Add max_puzzles if it was specified
+    if 'max_puzzles' in config:
+        state_config['max_puzzles'] = config['max_puzzles']
+
+    training_state['config'] = state_config
 
     print(f"✓ Dataset loaded: {len(dataset)} examples")
     print(f"✓ Unique grids: {num_unique_grids}")
