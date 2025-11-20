@@ -176,9 +176,9 @@ def collate_fn_pad(batch):
     grid_ids = torch.tensor([item['grid_id'] for item in batch])
     original_shapes = [item['original_shape'] for item in batch]
 
-    # Find max dimensions in batch
-    max_H = max(shape[0] for shape in original_shapes)
-    max_W = max(shape[1] for shape in original_shapes)
+    # Find max dimensions in batch based on actual augmented grid shapes
+    max_H = max(item['grid'].shape[0] for item in batch)
+    max_W = max(item['grid'].shape[1] for item in batch)
 
     # Pad all grids to max size
     padded_grids = []
