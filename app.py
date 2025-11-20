@@ -864,6 +864,8 @@ def initialize_arc_solver_training(config):
         arc_version=config.get('arc_version', 'agi1'),
         max_train_examples=config['max_train_examples'],
         subset_size=config.get('subset_size', None),
+        augment=config.get('augment', True),  # Enable augmentations by default
+        augmentations_per_puzzle=config.get('augmentations_per_puzzle', 50),  # 50× augmentations
     )
 
     val_dataset = ARCPuzzleDataset(
@@ -872,6 +874,7 @@ def initialize_arc_solver_training(config):
         arc_version=config.get('arc_version', 'agi1'),
         max_train_examples=config['max_train_examples'],
         subset_size=config.get('subset_size', None) // 4 if config.get('subset_size') else None,
+        augment=False,  # No augmentations for validation
     )
 
     train_loader = DataLoader(

@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import Dataset
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
+from dataset.common import dihedral_transform
 
 
 class ARCPuzzleDataset(Dataset):
@@ -33,7 +34,8 @@ class ARCPuzzleDataset(Dataset):
         arc_version: 'agi1' or 'agi2'
         max_train_examples: Maximum number of train examples per puzzle (for batching)
         max_test_examples: Maximum number of test examples to include
-        augment: Whether to apply augmentations (NOT IMPLEMENTED YET)
+        augment: Whether to apply augmentations (rotation + color permutation)
+        augmentations_per_puzzle: Number of augmented versions per puzzle per epoch
         subset_size: Optional limit on number of puzzles to load
     """
 
@@ -45,6 +47,7 @@ class ARCPuzzleDataset(Dataset):
         max_train_examples: int = 10,
         max_test_examples: int = 1,
         augment: bool = False,
+        augmentations_per_puzzle: int = 1,
         subset_size: Optional[int] = None
     ):
         self.data_dir = Path(data_dir)
@@ -53,6 +56,7 @@ class ARCPuzzleDataset(Dataset):
         self.max_train_examples = max_train_examples
         self.max_test_examples = max_test_examples
         self.augment = augment
+        self.augmentations_per_puzzle = augmentations_per_puzzle if augment else 1
 
         # Load puzzles from JSON
         self.puzzles = self._load_puzzles()
@@ -62,7 +66,12 @@ class ARCPuzzleDataset(Dataset):
             print(f"Limiting dataset to {subset_size} puzzles (out of {len(self.puzzles)} available)")
             self.puzzles = self.puzzles[:subset_size]
 
-        print(f"Loaded {len(self.puzzles)} puzzles from {split} split (ARC-{arc_version.upper()})")
+        effective_size = len(self.puzzles) * self.augmentations_per_puzzle
+        if self.augment and self.augmentations_per_puzzle > 1:
+            print(f"Loaded {len(self.puzzles)} puzzles from {split} split (ARC-{arc_version.upper()})")
+            print(f"  With {self.augmentations_per_puzzle}× augmentations = {effective_size} effective training examples")
+        else:
+            print(f"Loaded {len(self.puzzles)} puzzles from {split} split (ARC-{arc_version.upper()})")
 
     def _load_puzzles(self) -> List[Dict]:
         """Load puzzles from JSON files."""
@@ -124,17 +133,43 @@ class ARCPuzzleDataset(Dataset):
         return puzzles
 
     def __len__(self) -> int:
-        """Return number of puzzles in the dataset."""
-        return len(self.puzzles)
+        """Return effective dataset size (puzzles × augmentations)."""
+        return len(self.puzzles) * self.augmentations_per_puzzle
 
     def _grid_to_tensor(self, grid: List[List[int]]) -> torch.Tensor:
         """Convert grid from list format to tensor."""
         arr = np.array(grid, dtype=np.int64)
         return torch.from_numpy(arr)
 
+    def _apply_augmentation(self, grid: torch.Tensor, trans_id: int, color_perm: np.ndarray) -> torch.Tensor:
+        """
+        Apply consistent augmentation to a grid.
+
+        Args:
+            grid: Tensor [H, W]
+            trans_id: Dihedral transformation ID (0-7)
+            color_perm: Color permutation array
+
+        Returns:
+            Augmented grid tensor
+        """
+        # Convert to numpy for augmentation
+        grid_np = grid.numpy().astype(np.uint8)
+
+        # Apply dihedral transformation
+        grid_np = dihedral_transform(grid_np, trans_id)
+
+        # Apply color permutation
+        grid_np = color_perm[grid_np]
+
+        return torch.from_numpy(grid_np).long()
+
     def __getitem__(self, idx: int) -> Dict:
         """
-        Get a single puzzle.
+        Get a single puzzle with augmentation.
+
+        Args:
+            idx: Index in range [0, len(puzzles) * augmentations_per_puzzle)
 
         Returns:
             dict with keys:
@@ -146,24 +181,52 @@ class ARCPuzzleDataset(Dataset):
             - num_train: int - Number of train examples
             - num_test: int - Number of test examples
         """
-        puzzle = self.puzzles[idx]
+        # Map augmented index to base puzzle index
+        puzzle_idx = idx % len(self.puzzles)
+        puzzle = self.puzzles[puzzle_idx]
+
+        # Sample augmentation parameters (same for entire puzzle)
+        if self.augment:
+            trans_id = np.random.randint(0, 8)  # 8 dihedral transformations
+            color_perm = np.arange(10, dtype=np.uint8)
+            color_perm[1:] = np.random.permutation(np.arange(1, 10, dtype=np.uint8))
+        else:
+            trans_id = 0  # Identity transformation
+            color_perm = np.arange(10, dtype=np.uint8)  # No permutation
 
         # Extract train examples
         train_inputs = []
         train_outputs = []
         for example in puzzle['train'][:self.max_train_examples]:
-            train_inputs.append(self._grid_to_tensor(example['input']))
-            train_outputs.append(self._grid_to_tensor(example['output']))
+            train_in = self._grid_to_tensor(example['input'])
+            train_out = self._grid_to_tensor(example['output'])
+
+            if self.augment:
+                train_in = self._apply_augmentation(train_in, trans_id, color_perm)
+                train_out = self._apply_augmentation(train_out, trans_id, color_perm)
+
+            train_inputs.append(train_in)
+            train_outputs.append(train_out)
 
         # Extract test examples
         test_inputs = []
         test_outputs = []
         for i, test_example in enumerate(puzzle['test'][:self.max_test_examples]):
-            test_inputs.append(self._grid_to_tensor(test_example['input']))
+            test_in = self._grid_to_tensor(test_example['input'])
+
+            if self.augment:
+                test_in = self._apply_augmentation(test_in, trans_id, color_perm)
+
+            test_inputs.append(test_in)
 
             # Add solution if available
             if puzzle['test_solutions'][i] is not None:
-                test_outputs.append(self._grid_to_tensor(puzzle['test_solutions'][i]))
+                test_out = self._grid_to_tensor(puzzle['test_solutions'][i])
+
+                if self.augment:
+                    test_out = self._apply_augmentation(test_out, trans_id, color_perm)
+
+                test_outputs.append(test_out)
             else:
                 test_outputs.append(None)
 
