@@ -391,6 +391,35 @@ def save_checkpoint(epoch, metrics, is_best=False):
 
     print(f"  Saved: {path}")
 
+    # Clean up old checkpoints (keep only the N most recent, plus best_model.pt)
+    if not is_best:
+        keep_n_checkpoints = config.get('keep_n_checkpoints', 3)
+        cleanup_old_checkpoints(checkpoint_dir, keep_n_checkpoints)
+
+
+def cleanup_old_checkpoints(checkpoint_dir, keep_n=3):
+    """Remove old checkpoint files, keeping only the N most recent."""
+    import glob
+
+    # Find all checkpoint files (excluding best_model.pt)
+    pattern = os.path.join(checkpoint_dir, 'checkpoint_epoch_*.pt')
+    checkpoints = glob.glob(pattern)
+
+    if len(checkpoints) <= keep_n:
+        return
+
+    # Sort by modification time (oldest first)
+    checkpoints.sort(key=os.path.getmtime)
+
+    # Remove oldest checkpoints
+    to_remove = checkpoints[:-keep_n]
+    for ckpt_path in to_remove:
+        try:
+            os.remove(ckpt_path)
+            print(f"  Removed old checkpoint: {os.path.basename(ckpt_path)}")
+        except Exception as e:
+            print(f"  Warning: Failed to remove {ckpt_path}: {e}")
+
 
 def get_training_state():
     """Get current training state."""
