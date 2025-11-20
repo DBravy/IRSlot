@@ -47,7 +47,11 @@ training_state = {
     'start_time': None,
     # Use None so JSON serialization never chokes on inf/NaN
     'best_loss': None,
+    'config_saved': False,  # Track if configuration has been saved
 }
+
+# Saved configuration (separate from training_state to persist across sessions)
+saved_config = None
 
 # Training components (initialized when user clicks start)
 training_components = {
@@ -390,14 +394,59 @@ def api_state():
     return jsonify(get_training_state())
 
 
+@app.route('/api/save_config', methods=['POST'])
+def api_save_config():
+    """Save configuration without starting training."""
+    global saved_config
+
+    config = request.json or {}
+    print(f"\n{'='*60}")
+    print(f"API /save_config called")
+    print(f"Received config: {config}")
+    print(f"{'='*60}")
+
+    # Validate required fields
+    if 'data_dir' not in config:
+        print("ERROR: data_dir not in config")
+        return jsonify({'error': 'data_dir is required'}), 400
+
+    # Save configuration
+    saved_config = config
+    training_state['config_saved'] = True
+
+    print(f"✓ Configuration saved successfully")
+    return jsonify({
+        'status': 'saved',
+        'config': saved_config
+    })
+
+
+@app.route('/api/get_config', methods=['GET'])
+def api_get_config():
+    """Get the currently saved configuration."""
+    global saved_config
+
+    return jsonify({
+        'config': saved_config,
+        'config_saved': training_state['config_saved']
+    })
+
+
 @app.route('/api/start', methods=['POST'])
 def api_start():
-    """Start training with configuration from request."""
+    """Start training with saved configuration."""
+    global saved_config
+
     print(f"\n{'='*60}")
     print(f"API /start called - Current status: {training_state['status']}")
     print(f"{'='*60}")
 
     if training_state['status'] in ['idle', 'stopped', 'completed']:
+        # Check if configuration has been saved
+        if not saved_config:
+            print("ERROR: No configuration saved")
+            return jsonify({'error': 'Please save configuration first'}), 400
+
         # Reset state for new training session
         if training_state['status'] in ['stopped', 'completed']:
             print("Resetting training state for new session...")
@@ -417,14 +466,14 @@ def api_start():
             training_state['start_time'] = None
             training_state['best_loss'] = None
 
-        # Get configuration from request
-        config = request.json or {}
-        print(f"Received config: {config}")
+        # Use saved configuration
+        config = saved_config
+        print(f"Using saved config: {config}")
 
         # Validate required fields
         if 'data_dir' not in config:
             print("ERROR: data_dir not in config")
-            return jsonify({'error': 'data_dir is required'}), 400
+            return jsonify({'error': 'data_dir is required in saved configuration'}), 400
 
         # Initialize training components
         try:
