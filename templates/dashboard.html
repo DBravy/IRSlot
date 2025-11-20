@@ -448,6 +448,19 @@
         <div id="similarity-chart"></div>
     </div>
 
+    <div class="chart-container">
+        <h2 style="color: #667eea; margin-bottom: 15px;">
+            Attention Masks
+            <span style="font-size: 0.8em; color: #888; font-weight: normal;">(Updated every 20 batches)</span>
+        </h2>
+        <div id="attention-info" style="color: #888; margin-bottom: 15px; font-size: 0.9em;">
+            Waiting for visualizations...
+        </div>
+        <div id="attention-visualizations" style="display: grid; grid-template-columns: 1fr; gap: 15px;">
+            <!-- Attention visualizations will be inserted here -->
+        </div>
+    </div>
+
     <script>
         console.log('Dashboard script loading...');
         const socket = io();
@@ -1161,6 +1174,38 @@
             console.log('🎉 Training completed!');
             updateUI(state);
             alert('Training completed! Check your checkpoints directory for saved models.');
+        });
+
+        socket.on('attention_update', (data) => {
+            console.log(`🎨 Attention visualization update received: epoch ${data.epoch}, batch ${data.batch}, ${data.images.length} images`);
+
+            // Update info text
+            const infoEl = document.getElementById('attention-info');
+            infoEl.textContent = `Epoch ${data.epoch}, Batch ${data.batch}, Step ${data.step}`;
+
+            // Update visualizations
+            const container = document.getElementById('attention-visualizations');
+            container.innerHTML = '';  // Clear previous visualizations
+
+            data.images.forEach((imgBase64, idx) => {
+                const imgWrapper = document.createElement('div');
+                imgWrapper.style.cssText = 'background: #252538; padding: 10px; border-radius: 8px;';
+
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${imgBase64}`;
+                img.style.cssText = 'width: 100%; height: auto; border-radius: 5px;';
+                img.alt = `Sample ${idx + 1}`;
+
+                const label = document.createElement('div');
+                label.style.cssText = 'color: #888; font-size: 0.85em; margin-top: 8px; text-align: center;';
+                label.textContent = `Sample ${idx + 1}`;
+
+                imgWrapper.appendChild(img);
+                imgWrapper.appendChild(label);
+                container.appendChild(imgWrapper);
+            });
+
+            console.log('✓ Attention visualizations updated');
         });
     </script>
 </body>

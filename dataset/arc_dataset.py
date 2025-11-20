@@ -110,20 +110,31 @@ class ARCInstanceDataset(Dataset):
         # Reshape to 2D
         grid = flat_grid.reshape(self.max_grid_size, self.max_grid_size)
 
-        # Find actual grid bounds (marked by EOS = 1)
-        eos_positions = np.where(grid == 1)
-        if len(eos_positions[0]) > 0:
-            H = eos_positions[0].min() if eos_positions[0].min() > 0 else self.max_grid_size
-            W = eos_positions[1].min() if eos_positions[1].min() > 0 else self.max_grid_size
+        # Find actual grid content (values >= 2)
+        # Due to translational augmentation, grid can be anywhere in the 30x30 space
+        content_mask = grid >= 2
+        if content_mask.any():
+            # Find bounding box of content
+            rows_with_content = np.where(content_mask.any(axis=1))[0]
+            cols_with_content = np.where(content_mask.any(axis=0))[0]
+
+            min_row = rows_with_content.min()
+            max_row = rows_with_content.max() + 1  # +1 for exclusive end
+            min_col = cols_with_content.min()
+            max_col = cols_with_content.max() + 1
+
+            # Extract content
+            grid = grid[min_row:max_row, min_col:max_col]
         else:
-            # No EOS found, use full grid
-            H = W = self.max_grid_size
+            # No content, return empty 1x1 grid
+            grid = np.array([[0]], dtype=np.uint8)
 
-        # Extract actual grid and convert from encoding (2-11) to colors (0-9)
-        grid = grid[:H, :W]
-        grid = np.clip(grid - 2, 0, 9).astype(np.uint8)
+        # Convert from encoding (2-11) to colors (0-9)
+        # Convert to int16 first to avoid underflow
+        grid = grid.astype(np.int16) - 2
+        grid = np.clip(grid, 0, 9).astype(np.uint8)
 
-        return grid, (H, W)
+        return grid, grid.shape
 
     def __getitem__(self, idx):
         """

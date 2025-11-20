@@ -48,15 +48,17 @@ class SlotAttention(nn.Module):
             nn.Linear(hidden_dim, slot_dim)
         )
         
-    def forward(self, inputs, spatial_size=None):
+    def forward(self, inputs, spatial_size=None, return_attn=False):
         """
         Args:
             inputs: Feature maps [B, H*W, feature_dim] or [B, num_features, feature_dim]
             spatial_size: Optional tuple (H, W) indicating spatial dimensions of the features.
                          If None, assumes square grid and computes from input size.
-            
+            return_attn: If True, return attention weights from final iteration
+
         Returns:
             slots: [B, num_slots, slot_dim]
+            attn: [B, num_slots, H*W] - Only returned if return_attn=True
         """
         B, N, D = inputs.shape
         
@@ -90,36 +92,43 @@ class SlotAttention(nn.Module):
         v = self.project_v(inputs)  # [B, N, slot_dim]
         
         # Iterative attention
-        for _ in range(self.num_iterations):
+        attn_weights = None
+        for iteration in range(self.num_iterations):
             slots_prev = slots
             slots = self.norm_slots(slots)
-            
+
             # Attention
             q = self.project_q(slots)  # [B, num_slots, slot_dim]
-            
+
             # Compute attention weights
             # [B, num_slots, slot_dim] @ [B, slot_dim, N] -> [B, num_slots, N]
             attn_logits = torch.bmm(q, k.transpose(-1, -2)) / (self.slot_dim ** 0.5)
             attn = F.softmax(attn_logits, dim=-1)  # Softmax over slots
-            
+
             # Normalize attention weights across slots (competition)
             attn = attn + self.eps
             attn = attn / attn.sum(dim=1, keepdim=True)
-            
+
+            # Store attention from final iteration if requested
+            if return_attn and iteration == self.num_iterations - 1:
+                attn_weights = attn
+
             # Weighted mean
             # [B, num_slots, N] @ [B, N, slot_dim] -> [B, num_slots, slot_dim]
             updates = torch.bmm(attn, v)
-            
+
             # Update slots with GRU
             slots = self.gru(
                 updates.reshape(B * self.num_slots, self.slot_dim),
                 slots_prev.reshape(B * self.num_slots, self.slot_dim)
             )
             slots = slots.reshape(B, self.num_slots, self.slot_dim)
-            
+
             # Apply MLP
             slots = slots + self.mlp(slots)
-        
+
+        if return_attn:
+            return slots, attn_weights
         return slots
 
 

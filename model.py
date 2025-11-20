@@ -71,16 +71,18 @@ class SlotInstanceModel(nn.Module):
             nn.Linear(slot_dim, embedding_dim)
         )
 
-    def forward(self, grids):
+    def forward(self, grids, return_attn=False):
         """
         Forward pass.
 
         Args:
             grids: [B, H, W] - Input grids with integer values 0-9
+            return_attn: If True, return attention weights from slot attention
 
         Returns:
             embeddings: [B, embedding_dim] - Final embeddings for contrastive learning
             slots: [B, num_slots, slot_dim] - Intermediate slot representations
+            attn_weights: [B, num_slots, H, W] - Attention masks (only if return_attn=True)
         """
         B, H, W = grids.shape
 
@@ -90,7 +92,12 @@ class SlotInstanceModel(nn.Module):
 
         # Apply slot attention
         # [B, H*W, feature_dim] -> [B, num_slots, slot_dim]
-        slots = self.slot_attention(features, spatial_size=(H, W))
+        if return_attn:
+            slots, attn_weights = self.slot_attention(features, spatial_size=(H, W), return_attn=True)
+            # Reshape attention weights from [B, num_slots, H*W] to [B, num_slots, H, W]
+            attn_weights = attn_weights.reshape(B, self.num_slots, H, W)
+        else:
+            slots = self.slot_attention(features, spatial_size=(H, W))
 
         # Pool slots to get single representation
         # Mean pooling across slots: [B, num_slots, slot_dim] -> [B, slot_dim]
@@ -103,6 +110,8 @@ class SlotInstanceModel(nn.Module):
         # Normalize embeddings for contrastive learning
         embeddings = F.normalize(embeddings, dim=1)
 
+        if return_attn:
+            return embeddings, slots, attn_weights
         return embeddings, slots
 
     def get_embeddings(self, grids):

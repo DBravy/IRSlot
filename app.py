@@ -13,6 +13,12 @@ import argparse
 import torch
 import time
 import math
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
 from datetime import datetime
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO
@@ -80,6 +86,118 @@ def _sanitize_metric(value, default=0.0):
     if not math.isfinite(v):
         return float(default)
     return v
+
+
+def generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3):
+    """
+    Generate attention mask visualizations for a batch of grids.
+
+    Args:
+        grids: [B, H, W] - Input grids (padded)
+        attn_weights: [B, num_slots, H, W] - Attention masks (padded)
+        original_shapes: List of (H, W) tuples for original (non-padded) sizes
+        num_samples: Number of samples to visualize from batch
+
+    Returns:
+        List of base64-encoded PNG images
+    """
+    # ARC color palette (0-9)
+    ARC_COLORS = [
+        '#000000',  # 0: black
+        '#0074D9',  # 1: blue
+        '#FF4136',  # 2: red
+        '#2ECC40',  # 3: green
+        '#FFDC00',  # 4: yellow
+        '#AAAAAA',  # 5: gray
+        '#F012BE',  # 6: magenta
+        '#FF851B',  # 7: orange
+        '#7FDBFF',  # 8: sky blue
+        '#870C25',  # 9: dark red
+    ]
+
+    visualizations = []
+    B, num_slots, H, W = attn_weights.shape
+
+    # Debug: Check input types and values
+    print(f"\nVisualization Debug:")
+    print(f"  grids.shape={grids.shape}, grids.dtype={grids.dtype}")
+    print(f"  grids.min()={grids.min()}, grids.max()={grids.max()}")
+    print(f"  attn_weights.shape={attn_weights.shape}")
+    print(f"  First grid sample (before numpy conversion):")
+    print(f"    {grids[0, :5, :10]}")
+
+    # Convert to numpy and move to CPU
+    grids_np = grids.detach().cpu().numpy()
+    attn_np = attn_weights.detach().cpu().numpy()
+
+    # Take only num_samples from the batch
+    num_samples = min(num_samples, B)
+
+    for batch_idx in range(num_samples):
+        grid = grids_np[batch_idx]  # [H_padded, W_padded]
+        attn = attn_np[batch_idx]   # [num_slots, H_padded, W_padded]
+
+        # Get original (non-padded) dimensions
+        orig_H, orig_W = original_shapes[batch_idx]
+
+        # Crop to original size (remove padding)
+        grid = grid[:orig_H, :orig_W]
+        attn = attn[:, :orig_H, :orig_W]
+
+        H, W = orig_H, orig_W
+
+        # Debug: Print grid statistics
+        unique_colors = np.unique(grid)
+        print(f"  Sample {batch_idx}: shape={grid.shape}, "
+              f"unique_colors={unique_colors}, num_colors={len(unique_colors)}")
+        print(f"    Grid values (first 5 rows): \n{grid[:min(5, H), :min(10, W)]}")
+        print(f"    BEFORE cropping - full padded grid shape: {grids_np[batch_idx].shape}")
+        print(f"    BEFORE cropping - unique colors: {np.unique(grids_np[batch_idx])}")
+        print(f"    Original shape to crop to: {original_shapes[batch_idx]}")
+
+        # Create figure with grid and all slot attention masks
+        fig, axes = plt.subplots(1, num_slots + 1, figsize=(3 * (num_slots + 1), 3))
+
+        # Plot original grid
+        grid_img = np.zeros((H, W, 3))
+        for i in range(H):
+            for j in range(W):
+                color_idx = int(grid[i, j])
+                color_hex = ARC_COLORS[color_idx]
+                # Convert hex to RGB
+                r = int(color_hex[1:3], 16) / 255.0
+                g = int(color_hex[3:5], 16) / 255.0
+                b = int(color_hex[5:7], 16) / 255.0
+                grid_img[i, j] = [r, g, b]
+
+        axes[0].imshow(grid_img, interpolation='nearest')
+        axes[0].set_title('Input Grid', fontsize=10, color='white')
+        axes[0].axis('off')
+
+        # Plot each slot's attention mask
+        for slot_idx in range(num_slots):
+            mask = attn[slot_idx]  # [H, W]
+
+            # Show attention as heatmap overlaid on grid
+            axes[slot_idx + 1].imshow(grid_img, interpolation='nearest', alpha=0.5)
+            im = axes[slot_idx + 1].imshow(mask, cmap='hot', interpolation='nearest', alpha=0.7)
+            axes[slot_idx + 1].set_title(f'Slot {slot_idx}', fontsize=10, color='white')
+            axes[slot_idx + 1].axis('off')
+
+        # Set dark background
+        fig.patch.set_facecolor('#1a1a2e')
+
+        # Convert to base64
+        buf = BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format='png', facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight')
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close(fig)
+
+        visualizations.append(img_base64)
+
+    return visualizations
 
 
 def initialize_training(config):
@@ -294,6 +412,34 @@ def train_epoch(epoch):
                 socketio.sleep(0.001)  # Small yield to allow the message to be sent
             except Exception as e:
                 print(f"ERROR: Failed to emit batch_update: {e}")
+
+        # Generate and send attention visualizations every 20 batches
+        if batch_idx == 0 or (batch_idx + 1) % 20 == 0:
+            try:
+                print(f"Generating attention visualizations at batch {batch_idx + 1}...")
+                # Forward pass with attention weights
+                with torch.no_grad():
+                    _, _, attn_weights = model(grids, return_attn=True)
+
+                # Get original shapes from batch
+                original_shapes = batch.get('original_shapes', [(grids.shape[1], grids.shape[2])] * grids.shape[0])
+
+                # Generate visualizations (3 samples from batch)
+                vis_images = generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3)
+
+                print(f"Emitting {len(vis_images)} attention visualizations...")
+                socketio.emit('attention_update', {
+                    'epoch': epoch,
+                    'batch': batch_idx + 1,
+                    'step': training_state['global_step'],
+                    'images': vis_images
+                })
+                socketio.sleep(0.001)
+                print(f"✓ Attention visualizations sent")
+            except Exception as e:
+                print(f"ERROR: Failed to generate/emit attention visualizations: {e}")
+                import traceback
+                traceback.print_exc()
 
     # Compute epoch metrics
     avg_loss = total_loss / num_batches
