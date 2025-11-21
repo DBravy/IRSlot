@@ -11,7 +11,9 @@ This module integrates all components:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional
+import numpy as np
+from typing import Dict, Tuple, Optional, List
+from collections import Counter
 from pydantic import BaseModel
 
 from models.trm import CNNEncoder, SpatialBroadcastDecoder
@@ -364,3 +366,115 @@ class ARCSlotSolver(nn.Module):
         predictions = predicted_grids.argmax(dim=1)  # [batch, H, W]
 
         return predictions
+
+    @torch.no_grad()
+    def predict_with_tta(
+        self,
+        puzzle_dict: Dict,
+        num_augmentations: int = 100,
+        apply_dihedral: bool = True,
+        apply_color_permutation: bool = True,
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """
+        Predict with test-time augmentation and majority voting.
+
+        Args:
+            puzzle_dict: Single puzzle dict from ARCPuzzleDataset.__getitem__
+            num_augmentations: Number of augmented versions to run
+            apply_dihedral: Whether to apply dihedral transforms
+            apply_color_permutation: Whether to apply color permutations
+
+        Returns:
+            (voted_prediction, all_predictions): The majority-voted grid and list of all predictions
+        """
+        from augmentation import PuzzleAugmentation
+        from dataset.arc_puzzle_dataset import collate_puzzle_batch
+
+        self.eval()
+        device = next(self.parameters()).device
+
+        augmenter = PuzzleAugmentation(
+            apply_dihedral=apply_dihedral,
+            apply_color_permutation=apply_color_permutation
+        )
+
+        # Extract grids from puzzle dict
+        train_inputs = [g.numpy() if isinstance(g, torch.Tensor) else g
+                        for g in puzzle_dict['train_inputs']]
+        train_outputs = [g.numpy() if isinstance(g, torch.Tensor) else g
+                         for g in puzzle_dict['train_outputs']]
+        test_inputs = [g.numpy() if isinstance(g, torch.Tensor) else g
+                       for g in puzzle_dict['test_inputs']]
+        test_outputs = [g.numpy() if isinstance(g, torch.Tensor) else g
+                        for g in puzzle_dict['test_outputs'] if g is not None]
+
+        # Get original output shape for reference
+        original_shape = test_outputs[0].shape if test_outputs else test_inputs[0].shape
+
+        all_predictions = []
+
+        for _ in range(num_augmentations):
+            # Apply augmentation to entire puzzle
+            aug_train_in, aug_train_out, aug_test_in, params = augmenter.augment_puzzle(
+                train_inputs, train_outputs, test_inputs
+            )
+
+            # Also augment test outputs to get correct target shape
+            aug_test_out = [augmenter.apply_to_grid(g, params) for g in test_outputs] if test_outputs else []
+
+            # Create augmented puzzle dict
+            aug_puzzle = {
+                'puzzle_id': puzzle_dict['puzzle_id'],
+                'train_inputs': [torch.from_numpy(g) for g in aug_train_in],
+                'train_outputs': [torch.from_numpy(g) for g in aug_train_out],
+                'test_inputs': [torch.from_numpy(g) for g in aug_test_in],
+                'test_outputs': [torch.from_numpy(g) for g in aug_test_out] if aug_test_out else [None],
+                'num_train': puzzle_dict['num_train'],
+                'num_test': puzzle_dict['num_test'],
+            }
+
+            # Collate into batch of 1
+            batch = collate_puzzle_batch([aug_puzzle])
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+
+            # Get prediction
+            pred = self.predict(batch)[0].cpu().numpy()  # [H, W]
+
+            # Invert augmentation on prediction
+            pred_inverted = augmenter.invert_grid(pred, params)
+
+            # Crop to original shape (in case of padding differences)
+            h, w = original_shape
+            pred_inverted = pred_inverted[:h, :w]
+
+            all_predictions.append(pred_inverted)
+
+        # Majority voting (pixel-wise)
+        voted = self._majority_vote(all_predictions)
+
+        return voted, all_predictions
+
+    def _majority_vote(self, predictions: List[np.ndarray]) -> np.ndarray:
+        """
+        Pixel-wise majority voting over predictions.
+
+        Args:
+            predictions: List of [H, W] arrays with integer predictions
+
+        Returns:
+            voted: [H, W] array with majority-voted prediction
+        """
+        # Stack predictions: [N, H, W]
+        stacked = np.stack(predictions, axis=0)
+        H, W = stacked.shape[1], stacked.shape[2]
+
+        voted = np.zeros((H, W), dtype=np.uint8)
+
+        for i in range(H):
+            for j in range(W):
+                pixel_values = stacked[:, i, j]
+                counter = Counter(pixel_values)
+                voted[i, j] = counter.most_common(1)[0][0]
+
+        return voted

@@ -1113,15 +1113,36 @@
                 updateAttentionVizButton(state.attention_viz_paused);
             }
 
-            // Reset training data (historical data will be populated via batch_update events)
+            // Reset training data (will be populated by batch_history if available)
             trainingData.epochs = [];
             trainingData.loss = [];
             trainingData.accuracy = [];
             trainingData.posSim = [];
             trainingData.negSim = [];
+            chartsInitialized = false;
 
-            console.log('📊 Chart data cleared. Waiting for batch updates...');
+            console.log('📊 Chart data cleared. Waiting for batch history or updates...');
 
+            updateCharts();
+        });
+
+        // Handle batch history for late-joining clients
+        socket.on('batch_history', (history) => {
+            console.log(`📜 Received batch history: ${history.steps.length} data points`);
+
+            // Populate training data from history
+            trainingData.epochs = history.steps.slice();
+            trainingData.loss = history.loss.slice();
+            trainingData.accuracy = history.accuracy.slice();
+            trainingData.posSim = history.pos_sim.slice();
+            trainingData.negSim = history.neg_sim.slice();
+
+            console.log(`📊 Chart data populated with ${trainingData.epochs.length} historical points`);
+            if (trainingData.epochs.length > 0) {
+                console.log(`   X-axis range: ${Math.min(...trainingData.epochs)} to ${Math.max(...trainingData.epochs)}`);
+            }
+
+            // Update charts with historical data
             updateCharts();
         });
 

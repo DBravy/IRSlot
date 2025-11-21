@@ -64,6 +64,15 @@ training_state = {
     'attention_viz_paused': False,  # Track if attention visualizations are paused
 }
 
+# Store batch-level history for chart data (allows late-joining clients to see full history)
+batch_history = {
+    'steps': [],
+    'loss': [],
+    'accuracy': [],
+    'pos_sim': [],
+    'neg_sim': [],
+}
+
 # Saved configuration (separate from training_state to persist across sessions)
 saved_config = None
 
@@ -541,6 +550,14 @@ def train_epoch(epoch):
 
             emission_count += 1
             print(f"Emitting batch_update #{emission_count}: epoch={epoch}, batch={batch_idx + 1}/{len(dataloader)}, step={current_step}, loss={safe_loss:.4f}")
+
+            # Store in batch history for late-joining clients
+            batch_history['steps'].append(current_step)
+            batch_history['loss'].append(safe_loss)
+            batch_history['accuracy'].append(safe_acc)
+            batch_history['pos_sim'].append(safe_pos_sim)
+            batch_history['neg_sim'].append(safe_neg_sim)
+
             try:
                 socketio.emit('batch_update', {
                     'epoch': epoch,
@@ -827,6 +844,12 @@ def api_start():
             }
             training_state['start_time'] = None
             training_state['best_loss'] = None
+            # Clear batch history for new training
+            batch_history['steps'] = []
+            batch_history['loss'] = []
+            batch_history['accuracy'] = []
+            batch_history['pos_sim'] = []
+            batch_history['neg_sim'] = []
 
         # Use saved configuration
         config = saved_config
@@ -918,6 +941,13 @@ def handle_connect():
     print(f"Sending initial state: status={state['status']}, epoch={state['current_epoch']}/{state['total_epochs']}")
     socketio.emit('initial_state', state)
     print("✓ Initial state sent")
+
+    # Send batch history so late-joining clients can see the full chart
+    if batch_history['steps']:
+        print(f"Sending batch history: {len(batch_history['steps'])} data points")
+        socketio.emit('batch_history', batch_history)
+        print("✓ Batch history sent")
+
     print("="*60 + "\n")
 
 
