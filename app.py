@@ -938,6 +938,7 @@ arc_solver_state = {
     'start_time': None,
     'best_val_accuracy': None,
     'config_saved': False,
+    'visualizations_paused': False,  # Track if visualizations are paused
 }
 
 arc_solver_saved_config = None
@@ -1159,7 +1160,8 @@ def train_arc_solver_epoch(epoch):
             step_batch_count = 0
 
         # Generate attention visualizations every 10 batches
-        if batch_idx == 0 or (batch_idx + 1) % 10 == 0:
+        # Only generate if visualizations are not paused
+        if not arc_solver_state['visualizations_paused'] and (batch_idx == 0 or (batch_idx + 1) % 10 == 0):
             try:
                 with torch.no_grad():
                     # Get attention weights from slot encoder
@@ -1264,7 +1266,8 @@ def train_arc_solver_epoch(epoch):
 
         # Generate reconstruction visualizations every 30 batches (skip first batch)
         # Only run after training has started to avoid interference
-        if batch_idx > 0 and (batch_idx + 1) % 30 == 0:
+        # Only generate if visualizations are not paused
+        if not arc_solver_state['visualizations_paused'] and batch_idx > 0 and (batch_idx + 1) % 30 == 0:
             try:
                 # Save current training state
                 was_training = model.training
@@ -1577,6 +1580,21 @@ def arc_solver_api_stop():
         socketio.emit('status_changed', get_arc_solver_state(), namespace=arc_solver_namespace)
         return jsonify({'status': 'stopped'})
     return jsonify({'error': 'Training not active'}), 400
+
+
+@app.route('/arc_solver/api/toggle_visualizations', methods=['POST'])
+def arc_solver_api_toggle_visualizations():
+    """Toggle visualization pause state."""
+    arc_solver_state['visualizations_paused'] = not arc_solver_state['visualizations_paused']
+    new_state = arc_solver_state['visualizations_paused']
+    print(f"ARC Solver visualizations {'paused' if new_state else 'resumed'}")
+    socketio.emit('visualizations_state_changed', {
+        'paused': new_state
+    }, namespace=arc_solver_namespace)
+    return jsonify({
+        'paused': new_state,
+        'message': 'Visualizations ' + ('paused' if new_state else 'resumed')
+    })
 
 
 @socketio.on('connect', namespace=arc_solver_namespace)

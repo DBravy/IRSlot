@@ -463,6 +463,15 @@
                     ⏹ Stop
                 </button>
             </div>
+            <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #2a2a3e;">
+                <button class="btn" id="btn-toggle-viz" onclick="toggleVisualizations()"
+                        style="background: #667eea; color: white;">
+                    👁️ Pause Visualizations
+                </button>
+                <div id="viz-status" style="display: inline-block; margin-left: 10px; color: #4ade80; font-size: 0.9em;">
+                    ● Active
+                </div>
+            </div>
         </div>
     </div>
 
@@ -726,6 +735,35 @@
             }
         }
 
+        function toggleVisualizations() {
+            fetch('/arc_solver/api/toggle_visualizations', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    console.log('Visualizations toggled:', data);
+                    updateVisualizationStatus(data.paused);
+                })
+                .catch(err => console.error('Error:', err));
+        }
+
+        function updateVisualizationStatus(paused) {
+            const btnToggleViz = document.getElementById('btn-toggle-viz');
+            const vizStatus = document.getElementById('viz-status');
+
+            if (paused) {
+                btnToggleViz.textContent = '👁️ Resume Visualizations';
+                btnToggleViz.style.background = '#fbbf24';
+                btnToggleViz.style.color = '#0f0f1e';
+                vizStatus.textContent = '⏸ Paused';
+                vizStatus.style.color = '#fbbf24';
+            } else {
+                btnToggleViz.textContent = '👁️ Pause Visualizations';
+                btnToggleViz.style.background = '#667eea';
+                btnToggleViz.style.color = 'white';
+                vizStatus.textContent = '● Active';
+                vizStatus.style.color = '#4ade80';
+            }
+        }
+
         function updateButtons(status) {
             const btnStart = document.getElementById('btn-start');
             const btnPause = document.getElementById('btn-pause');
@@ -788,6 +826,7 @@
         window.pauseTraining = pauseTraining;
         window.stopTraining = stopTraining;
         window.saveConfiguration = saveConfiguration;
+        window.toggleVisualizations = toggleVisualizations;
 
         // Socket events
         socket.on('initial_state', (state) => {
@@ -936,6 +975,11 @@
                 imgWrapper.appendChild(label);
                 container.appendChild(imgWrapper);
             });
+        });
+
+        socket.on('visualizations_state_changed', (data) => {
+            console.log('Visualizations state changed:', data);
+            updateVisualizationStatus(data.paused);
         });
 
         document.addEventListener('DOMContentLoaded', () => {
