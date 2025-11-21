@@ -259,7 +259,15 @@ def generate_reconstruction_visualizations(input_grids, pred_grids, target_grids
         pred_grid = pred_grid[:orig_H, :orig_W]
         target_grid = target_grid[:orig_H, :orig_W]
 
-        H, W = orig_H, orig_W
+        # Get actual dimensions after cropping (handle any size mismatches)
+        # Use minimum dimensions to ensure all grids are the same size
+        H = min(input_grid.shape[0], pred_grid.shape[0], target_grid.shape[0])
+        W = min(input_grid.shape[1], pred_grid.shape[1], target_grid.shape[1])
+
+        # Re-crop all grids to the minimum size to ensure consistency
+        input_grid = input_grid[:H, :W]
+        pred_grid = pred_grid[:H, :W]
+        target_grid = target_grid[:H, :W]
 
         # Create figure with 3 columns: input, prediction, target
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
