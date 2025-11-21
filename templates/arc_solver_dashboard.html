@@ -833,16 +833,27 @@
             console.log('Initial state:', state);
             updateUI(state);
 
-            // Reset training data (will be populated via batch_update events)
-            trainingData = {
-                epochs: [],
-                train_loss: [],
-                train_accuracy: [],
-                val_loss: [],
-                val_accuracy: []
-            };
+            // Load historical training data from state if available
+            if (state.metrics && state.metrics.epochs && state.metrics.epochs.length > 0) {
+                trainingData = {
+                    epochs: [...state.metrics.epochs],
+                    train_loss: [...state.metrics.train_loss],
+                    train_accuracy: [...state.metrics.train_accuracy],
+                    val_loss: [...state.metrics.val_loss],
+                    val_accuracy: [...state.metrics.val_accuracy]
+                };
+                console.log(`📊 Loaded ${trainingData.epochs.length} historical data points from server`);
+            } else {
+                trainingData = {
+                    epochs: [],
+                    train_loss: [],
+                    train_accuracy: [],
+                    val_loss: [],
+                    val_accuracy: []
+                };
+                console.log('📊 No historical data available. Starting fresh.');
+            }
 
-            console.log('📊 Chart data cleared. Waiting for batch updates...');
             updateCharts();
         });
 
