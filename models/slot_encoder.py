@@ -180,9 +180,9 @@ class SlotAttentionEncoder(nn.Module):
             # Attention weights: slots compete for input features
             # [B, num_slots, slot_dim] @ [B, slot_dim, N] -> [B, num_slots, N]
             attn_logits = torch.bmm(q, k.transpose(-1, -2)) / (self.slot_dim ** 0.5)
-            attn = F.softmax(attn_logits, dim=-1)
+            attn = F.softmax(attn_logits, dim=1)  # Softmax over slots (slots compete for each position)
 
-            # Normalize attention weights across slots (competition)
+            # Weighted normalization across slots (ensures proper competition)
             attn = attn + self.eps
             attn = attn / attn.sum(dim=1, keepdim=True)
 

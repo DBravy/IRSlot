@@ -979,6 +979,18 @@ arc_solver_state = {
     'visualizations_paused': False,  # Track if visualizations are paused
 }
 
+# Store batch-level history for arc solver (allows late-joining clients to see full history)
+arc_solver_batch_history = {
+    'steps': [],
+    'train_loss': [],
+    'train_accuracy': [],
+    'arc_loss': [],
+    'contrastive_loss': [],
+    'contrastive_accuracy': [],
+    'positive_similarity': [],
+    'negative_similarity': [],
+}
+
 arc_solver_saved_config = None
 
 arc_solver_components = {
@@ -1143,6 +1155,8 @@ def initialize_arc_solver_training(config):
 
 def train_arc_solver_epoch(epoch):
     """Train ARC solver for one epoch."""
+    global arc_solver_batch_history
+    
     model = arc_solver_components['model']
     memory_bank = arc_solver_components['memory_bank']
     optimizer = arc_solver_components['optimizer']
@@ -1251,6 +1265,26 @@ def train_arc_solver_epoch(epoch):
 
                 socketio.emit('batch_update', batch_update_data, namespace=arc_solver_namespace)
                 socketio.sleep(0.001)
+
+                # Store in batch history for late-joining clients
+                arc_solver_batch_history['steps'].append(current_step)
+                arc_solver_batch_history['train_loss'].append(avg_step_loss)
+                arc_solver_batch_history['train_accuracy'].append(avg_step_accuracy)
+                
+                # Add contrastive metrics to history if available
+                if memory_bank is not None:
+                    arc_solver_batch_history['arc_loss'].append(loss_dict['arc_loss'].item())
+                    arc_solver_batch_history['contrastive_loss'].append(loss_dict['contrastive_loss'].item())
+                    arc_solver_batch_history['contrastive_accuracy'].append(loss_dict['contrastive_accuracy'].item())
+                    arc_solver_batch_history['positive_similarity'].append(avg_step_pos_sim)
+                    arc_solver_batch_history['negative_similarity'].append(avg_step_neg_sim)
+                else:
+                    arc_solver_batch_history['arc_loss'].append(None)
+                    arc_solver_batch_history['contrastive_loss'].append(None)
+                    arc_solver_batch_history['contrastive_accuracy'].append(None)
+                    arc_solver_batch_history['positive_similarity'].append(None)
+                    arc_solver_batch_history['negative_similarity'].append(None)
+                
             except Exception as e:
                 print(f"ERROR: Failed to emit batch_update: {e}")
 
@@ -1626,7 +1660,7 @@ def arc_solver_api_save_config():
 
 @app.route('/arc_solver/api/start', methods=['POST'])
 def arc_solver_api_start():
-    global arc_solver_saved_config
+    global arc_solver_saved_config, arc_solver_batch_history
 
     print(f"\n{'='*60}")
     print(f"ARC Solver - Start training")
@@ -1652,6 +1686,16 @@ def arc_solver_api_start():
             }
             arc_solver_state['start_time'] = None
             arc_solver_state['best_val_accuracy'] = None
+            
+            # Clear batch history
+            arc_solver_batch_history['steps'] = []
+            arc_solver_batch_history['train_loss'] = []
+            arc_solver_batch_history['train_accuracy'] = []
+            arc_solver_batch_history['arc_loss'] = []
+            arc_solver_batch_history['contrastive_loss'] = []
+            arc_solver_batch_history['contrastive_accuracy'] = []
+            arc_solver_batch_history['positive_similarity'] = []
+            arc_solver_batch_history['negative_similarity'] = []
 
         # Initialize training
         try:
@@ -1717,6 +1761,14 @@ def arc_solver_handle_connect():
     state = get_arc_solver_state()
     socketio.emit('initial_state', state, namespace=arc_solver_namespace)
     print("✓ Initial state sent")
+    
+    # Send batch history so late-joining clients can see the full chart
+    if arc_solver_batch_history['steps']:
+        print(f"Sending batch history: {len(arc_solver_batch_history['steps'])} data points")
+        socketio.emit('batch_history', arc_solver_batch_history, namespace=arc_solver_namespace)
+        print("✓ Batch history sent")
+    
+    print("="*60 + "\n")
 
 
 # ============================================================================
