@@ -20,6 +20,8 @@ from models.trm import CNNEncoder, SpatialBroadcastDecoder
 from models.slot_encoder import SlotAttentionEncoder
 from models.arc_slot_builder import ARCSlotSequenceBuilder
 from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin
+from memory_bank import MemoryBank
+from loss import InfoNCELoss
 
 
 class ARCSlotSolverConfig(BaseModel):
@@ -56,6 +58,13 @@ class ARCSlotSolverConfig(BaseModel):
     # Position encodings
     use_rope: bool = True
     rope_theta: float = 10000.0
+
+    # Contrastive learning (multi-task)
+    use_contrastive_loss: bool = False
+    contrastive_embedding_dim: int = 128
+    contrastive_temperature: float = 0.07
+    contrastive_num_negatives: int = 512
+    contrastive_loss_weight: float = 1.0
 
 
 class TransformerBlock(nn.Module):
@@ -186,10 +195,29 @@ class ARCSlotSolver(nn.Module):
             forward_dtype=self.forward_dtype
         )
 
+        # 6. Contrastive Learning Components (Optional Multi-Task Learning)
+        self.use_contrastive = config.use_contrastive_loss
+        if self.use_contrastive:
+            # Projection head: Pool slots → embedding for contrastive learning
+            # NOTE: Slots are already projected to hidden_size by slot_encoder,
+            # so we project from hidden_size (not slot_dim) to embedding_dim
+            self.contrastive_projection = nn.Sequential(
+                nn.Linear(config.hidden_size, config.hidden_size),
+                nn.ReLU(),
+                nn.Linear(config.hidden_size, config.contrastive_embedding_dim)
+            )
+            self.contrastive_criterion = InfoNCELoss(temperature=config.contrastive_temperature)
+            self.contrastive_loss_weight = config.contrastive_loss_weight
+            self.contrastive_num_negatives = config.contrastive_num_negatives
+        else:
+            self.contrastive_projection = None
+            self.contrastive_criterion = None
+
     def forward(
         self,
         puzzle_batch: Dict[str, torch.Tensor],
-        return_intermediate: bool = False
+        return_intermediate: bool = False,
+        return_test_input_slots: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
         Solve ARC puzzles.
@@ -197,11 +225,13 @@ class ARCSlotSolver(nn.Module):
         Args:
             puzzle_batch: Dict from ARCPuzzleDataset collate function
             return_intermediate: If True, return intermediate representations
+            return_test_input_slots: If True, return raw slots from test input (for contrastive learning)
 
         Returns:
             Dict with:
                 - predicted_grids: [batch, output_channels, H, W]
                 - predicted_slots: [batch, num_slots, hidden_size]
+                - test_input_slots: [batch, num_slots, slot_dim] (only if return_test_input_slots=True)
                 - (optional) intermediate states
         """
         # 1. Build slot sequence
@@ -210,6 +240,26 @@ class ARCSlotSolver(nn.Module):
         sequence = sequence_output['sequence']  # [batch, seq_len, hidden_size]
         attention_mask = sequence_output['attention_mask']  # [batch, seq_len]
         predict_positions = sequence_output['predict_positions']  # [batch, 2]
+
+        # 1b. Extract test input slots for contrastive learning (if needed)
+        test_input_slots_raw = None
+        if return_test_input_slots and self.use_contrastive:
+            # Manually encode test input to get raw slots (before projection to hidden_size)
+            test_inputs = puzzle_batch['test_inputs'][:, 0]  # [batch, H, W] - first test input
+            batch_size, H, W = test_inputs.shape
+
+            # Encode with CNN
+            test_features = self.cnn_encoder(test_inputs)  # [batch, H*W, slot_dim]
+
+            # Get raw slots (before projection to hidden_size)
+            # We need to access the slot encoder's internals before projection
+            # For now, we'll use the slot encoder normally and then project back
+            # This is a workaround - ideally we'd modify SlotAttentionEncoder to return both
+            test_slots_hidden = self.slot_encoder(test_features, spatial_size=(H, W))  # [batch, num_slots, hidden_size]
+
+            # Since slots are already projected to hidden_size, we'll work with those
+            # The contrastive projection will map from hidden_size to embedding_dim
+            test_input_slots_raw = test_slots_hidden
 
         # 2. Transformer reasoning
         hidden_states = sequence.to(self.forward_dtype)
@@ -269,27 +319,36 @@ class ARCSlotSolver(nn.Module):
         if return_intermediate:
             result['intermediate_states'] = intermediate_states
 
+        if return_test_input_slots and test_input_slots_raw is not None:
+            result['test_input_slots'] = test_input_slots_raw
+
         return result
 
     def compute_loss(
         self,
         puzzle_batch: Dict[str, torch.Tensor],
+        memory_bank: Optional[MemoryBank] = None,
         reduction: str = 'mean'
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute training loss.
+        Compute training loss (with optional multi-task learning).
 
         Args:
             puzzle_batch: Dict from ARCPuzzleDataset collate function
+            memory_bank: Optional MemoryBank for contrastive learning
             reduction: 'mean', 'sum', or 'none'
 
         Returns:
             Dict with:
-                - loss: Total loss
+                - loss: Total loss (ARC + optional contrastive)
+                - arc_loss: ARC puzzle solving loss
+                - contrastive_loss: Contrastive learning loss (if enabled)
                 - pixel_accuracy: Accuracy metric
+                - contrastive_accuracy: Contrastive accuracy (if enabled)
         """
         # Forward pass
-        output = self.forward(puzzle_batch)
+        return_slots = self.use_contrastive and memory_bank is not None
+        output = self.forward(puzzle_batch, return_test_input_slots=return_slots)
         predicted_grids = output['predicted_grids']  # [batch, output_channels, H, W]
 
         # Get ground truth
@@ -311,7 +370,9 @@ class ARCSlotSolver(nn.Module):
                 targets_resized[b, :h, :w] = targets[b, :h, :w]
             targets = targets_resized
 
-        # Cross-entropy loss
+        # ============================================
+        # 1. ARC Puzzle Solving Loss (Cross-Entropy)
+        # ============================================
         # predicted_grids: [batch, num_colors, H, W]
         # targets: [batch, H, W] with values 0-9
 
@@ -325,22 +386,74 @@ class ARCSlotSolver(nn.Module):
         loss_per_pixel = loss_per_pixel * available.view(-1, 1, 1).float()
 
         if reduction == 'mean':
-            loss = loss_per_pixel.sum() / (available.sum() * H * W + 1e-8)
+            arc_loss = loss_per_pixel.sum() / (available.sum() * H * W + 1e-8)
         elif reduction == 'sum':
-            loss = loss_per_pixel.sum()
+            arc_loss = loss_per_pixel.sum()
         else:
-            loss = loss_per_pixel
+            arc_loss = loss_per_pixel
 
-        # Compute accuracy
+        # Compute pixel accuracy
         with torch.no_grad():
             predictions = predicted_grids.argmax(dim=1)  # [batch, H, W]
             correct = (predictions == targets).float()
             correct = correct * available.view(-1, 1, 1).float()
             pixel_accuracy = correct.sum() / (available.sum() * H * W + 1e-8)
 
+        # ============================================
+        # 2. Contrastive Learning Loss (Optional)
+        # ============================================
+        contrastive_loss = torch.tensor(0.0, device=arc_loss.device)
+        contrastive_accuracy = torch.tensor(0.0, device=arc_loss.device)
+
+        if self.use_contrastive and memory_bank is not None and 'test_input_slots' in output:
+            # Get test input slots
+            test_slots = output['test_input_slots']  # [batch, num_slots, hidden_size]
+
+            # Pool slots (mean across slots)
+            pooled_slots = test_slots.mean(dim=1)  # [batch, hidden_size]
+
+            # Project to embedding space
+            embeddings = self.contrastive_projection(pooled_slots)  # [batch, embedding_dim]
+            embeddings = F.normalize(embeddings, dim=1)
+
+            # Get puzzle indices (integer IDs for memory bank)
+            # Each puzzle's test input is a unique instance
+            puzzle_indices = puzzle_batch['puzzle_indices']  # [batch] - integer tensor
+
+            # Get stored embeddings from memory bank
+            stored_embeddings = memory_bank.get(puzzle_indices)
+
+            # Sample negative embeddings
+            negative_embeddings = memory_bank.sample_negatives(
+                num_negatives=self.contrastive_num_negatives,
+                exclude_ids=puzzle_indices
+            )
+
+            # Compute contrastive loss
+            contrastive_loss, contrastive_metrics = self.contrastive_criterion(
+                embeddings, stored_embeddings, negative_embeddings
+            )
+
+            contrastive_accuracy = torch.tensor(contrastive_metrics['accuracy'], device=arc_loss.device)
+
+            # Update memory bank (no gradients)
+            with torch.no_grad():
+                memory_bank.update(puzzle_indices, embeddings.detach())
+
+        # ============================================
+        # 3. Combine Losses (Multi-Task Learning)
+        # ============================================
+        if self.use_contrastive and memory_bank is not None:
+            total_loss = arc_loss + self.contrastive_loss_weight * contrastive_loss
+        else:
+            total_loss = arc_loss
+
         return {
-            'loss': loss,
+            'loss': total_loss,
+            'arc_loss': arc_loss,
+            'contrastive_loss': contrastive_loss,
             'pixel_accuracy': pixel_accuracy,
+            'contrastive_accuracy': contrastive_accuracy,
         }
 
     @torch.no_grad()

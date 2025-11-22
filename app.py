@@ -31,7 +31,7 @@ from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
 
 # ARC Solver imports
 from models.arc_solver import ARCSlotSolver, ARCSlotSolverConfig
-from dataset.arc_puzzle_dataset import ARCPuzzleDataset, collate_puzzle_batch
+from dataset.arc_puzzle_dataset import ARCPuzzleDataset, collate_puzzle_batch, create_collate_fn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from pathlib import Path
@@ -1022,11 +1022,20 @@ def initialize_arc_solver_training(config):
         augment=False,  # No augmentations for validation
     )
 
+    # Create appropriate collate function
+    # Use custom collate with puzzle_id mapping for multi-task learning
+    if config.get('use_contrastive', False):
+        train_collate_fn = create_collate_fn(train_dataset.puzzle_id_to_idx)
+        val_collate_fn = create_collate_fn(val_dataset.puzzle_id_to_idx)
+    else:
+        train_collate_fn = collate_puzzle_batch
+        val_collate_fn = collate_puzzle_batch
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
-        collate_fn=collate_puzzle_batch,
+        collate_fn=train_collate_fn,
         num_workers=0,
     )
 
@@ -1034,7 +1043,7 @@ def initialize_arc_solver_training(config):
         val_dataset,
         batch_size=config['batch_size'],
         shuffle=False,
-        collate_fn=collate_puzzle_batch,
+        collate_fn=val_collate_fn,
         num_workers=0,
     )
 
@@ -1059,11 +1068,36 @@ def initialize_arc_solver_training(config):
         output_channels=10,
         forward_dtype="float32",
         use_rope=True,
+        # Multi-task learning (contrastive)
+        use_contrastive_loss=config.get('use_contrastive', False),
+        contrastive_embedding_dim=128,
+        contrastive_temperature=config.get('contrastive_temperature', 0.07),
+        contrastive_num_negatives=config.get('contrastive_num_negatives', 512),
+        contrastive_loss_weight=config.get('contrastive_weight', 1.0),
     )
 
     model = ARCSlotSolver(model_config).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
+
+    # Create memory bank for contrastive learning (if enabled)
+    memory_bank = None
+    if config.get('use_contrastive', False):
+        print("\n" + "="*70)
+        print("ENABLING MULTI-TASK LEARNING (Contrastive + ARC)")
+        print("="*70)
+        num_unique_puzzles = train_dataset.num_unique_puzzles()
+        print(f"Creating memory bank for {num_unique_puzzles} unique puzzles...")
+        print(f"  (Dataset has {len(train_dataset)} effective examples with augmentations)")
+        memory_bank = MemoryBank(
+            num_grids=num_unique_puzzles,
+            embedding_dim=128,  # contrastive_embedding_dim
+            momentum=config.get('memory_bank_momentum', 0.5)
+        ).to(device)
+        print(f"Contrastive loss weight: {config.get('contrastive_weight', 1.0)}")
+        print(f"Temperature: {config.get('contrastive_temperature', 0.07)}")
+        print(f"Num negatives: {config.get('contrastive_num_negatives', 512)}")
+        print("="*70 + "\n")
 
     # Optimizer and scheduler
     optimizer = AdamW(
@@ -1078,6 +1112,7 @@ def initialize_arc_solver_training(config):
     # Store components
     arc_solver_components.update({
         'model': model,
+        'memory_bank': memory_bank,
         'optimizer': optimizer,
         'scheduler': scheduler,
         'train_loader': train_loader,
@@ -1109,6 +1144,7 @@ def initialize_arc_solver_training(config):
 def train_arc_solver_epoch(epoch):
     """Train ARC solver for one epoch."""
     model = arc_solver_components['model']
+    memory_bank = arc_solver_components['memory_bank']
     optimizer = arc_solver_components['optimizer']
     scheduler = arc_solver_components['scheduler']
     train_loader = arc_solver_components['train_loader']
@@ -1117,7 +1153,10 @@ def train_arc_solver_epoch(epoch):
 
     model.train()
     total_loss = 0.0
+    total_arc_loss = 0.0
+    total_contrastive_loss = 0.0
     total_accuracy = 0.0
+    total_contrastive_accuracy = 0.0
     num_batches = 0
 
     # Calculate batch_log_interval (default 10 batches per step)
@@ -1144,8 +1183,8 @@ def train_arc_solver_epoch(epoch):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                  for k, v in batch.items()}
 
-        # Forward pass
-        loss_dict = model.compute_loss(batch)
+        # Forward pass (with optional memory bank for multi-task learning)
+        loss_dict = model.compute_loss(batch, memory_bank=memory_bank)
         loss = loss_dict['loss']
         accuracy = loss_dict['pixel_accuracy']
 
@@ -1158,7 +1197,10 @@ def train_arc_solver_epoch(epoch):
 
         # Track metrics
         total_loss += loss.item()
+        total_arc_loss += loss_dict['arc_loss'].item()
+        total_contrastive_loss += loss_dict['contrastive_loss'].item()
         total_accuracy += accuracy.item()
+        total_contrastive_accuracy += loss_dict['contrastive_accuracy'].item()
         num_batches += 1
 
         # Accumulate metrics for the current step
@@ -1179,7 +1221,7 @@ def train_arc_solver_epoch(epoch):
             print(f"Emitting batch_update #{emission_count}: epoch={epoch}, batch={batch_idx + 1}/{len(train_loader)}, step={current_step}, loss={avg_step_loss:.4f}")
 
             try:
-                socketio.emit('batch_update', {
+                batch_update_data = {
                     'epoch': epoch,
                     'batch': batch_idx + 1,
                     'step': current_step,
@@ -1187,7 +1229,15 @@ def train_arc_solver_epoch(epoch):
                     'total_epochs': arc_solver_state['total_epochs'],
                     'train_loss': avg_step_loss,
                     'train_accuracy': avg_step_accuracy,
-                }, namespace=arc_solver_namespace)
+                }
+
+                # Add contrastive metrics if available
+                if memory_bank is not None:
+                    batch_update_data['arc_loss'] = loss_dict['arc_loss'].item()
+                    batch_update_data['contrastive_loss'] = loss_dict['contrastive_loss'].item()
+                    batch_update_data['contrastive_accuracy'] = loss_dict['contrastive_accuracy'].item()
+
+                socketio.emit('batch_update', batch_update_data, namespace=arc_solver_namespace)
                 socketio.sleep(0.001)
             except Exception as e:
                 print(f"ERROR: Failed to emit batch_update: {e}")
@@ -1393,11 +1443,17 @@ def train_arc_solver_epoch(epoch):
                     model.train()
 
     avg_loss = total_loss / num_batches
+    avg_arc_loss = total_arc_loss / num_batches
+    avg_contrastive_loss = total_contrastive_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
+    avg_contrastive_accuracy = total_contrastive_accuracy / num_batches
 
     return {
         'train_loss': avg_loss,
         'train_accuracy': avg_accuracy,
+        'arc_loss': avg_arc_loss,
+        'contrastive_loss': avg_contrastive_loss,
+        'contrastive_accuracy': avg_contrastive_accuracy,
     }
 
 

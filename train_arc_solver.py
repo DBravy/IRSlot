@@ -16,7 +16,8 @@ from tqdm import tqdm
 import time
 
 from models.arc_solver import ARCSlotSolver, ARCSlotSolverConfig
-from dataset.arc_puzzle_dataset import ARCPuzzleDataset, collate_puzzle_batch
+from dataset.arc_puzzle_dataset import ARCPuzzleDataset, collate_puzzle_batch, create_collate_fn
+from memory_bank import MemoryBank
 
 
 def parse_args():
@@ -79,6 +80,18 @@ def parse_args():
     parser.add_argument('--eval_every', type=int, default=5,
                         help='Run detailed evaluation every N epochs')
 
+    # Multi-task learning (Contrastive)
+    parser.add_argument('--use_contrastive', action='store_true',
+                        help='Enable multi-task learning with contrastive loss')
+    parser.add_argument('--contrastive_weight', type=float, default=1.0,
+                        help='Weight for contrastive loss')
+    parser.add_argument('--contrastive_temperature', type=float, default=0.07,
+                        help='Temperature for contrastive loss')
+    parser.add_argument('--contrastive_num_negatives', type=int, default=512,
+                        help='Number of negative samples for contrastive learning')
+    parser.add_argument('--memory_bank_momentum', type=float, default=0.5,
+                        help='Momentum for memory bank updates')
+
     return parser.parse_args()
 
 
@@ -101,6 +114,12 @@ def create_model(args):
         output_channels=10,
         forward_dtype="float32",
         use_rope=True,
+        # Contrastive learning
+        use_contrastive_loss=args.use_contrastive,
+        contrastive_embedding_dim=128,
+        contrastive_temperature=args.contrastive_temperature,
+        contrastive_num_negatives=args.contrastive_num_negatives,
+        contrastive_loss_weight=args.contrastive_weight,
     )
 
     model = ARCSlotSolver(config)
@@ -130,12 +149,15 @@ def create_datasets(args):
     return train_dataset, val_dataset
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args):
+def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args, memory_bank=None):
     """Train for one epoch."""
     model.train()
 
     total_loss = 0
+    total_arc_loss = 0
+    total_contrastive_loss = 0
     total_accuracy = 0
+    total_contrastive_accuracy = 0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs}')
@@ -145,8 +167,8 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                  for k, v in batch.items()}
 
-        # Forward pass
-        loss_dict = model.compute_loss(batch)
+        # Forward pass with optional memory bank
+        loss_dict = model.compute_loss(batch, memory_bank=memory_bank)
         loss = loss_dict['loss']
         accuracy = loss_dict['pixel_accuracy']
 
@@ -163,29 +185,47 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args):
 
         # Accumulate metrics
         total_loss += loss.item()
+        total_arc_loss += loss_dict['arc_loss'].item()
+        total_contrastive_loss += loss_dict['contrastive_loss'].item()
         total_accuracy += accuracy.item()
+        total_contrastive_accuracy += loss_dict['contrastive_accuracy'].item()
         num_batches += 1
 
         # Update progress bar
         if batch_idx % args.log_every == 0:
-            pbar.set_postfix({
+            postfix = {
                 'loss': f'{loss.item():.4f}',
                 'acc': f'{accuracy.item():.4f}',
                 'lr': f'{scheduler.get_last_lr()[0]:.6f}'
-            })
+            }
+            if args.use_contrastive:
+                postfix['arc_loss'] = f'{loss_dict["arc_loss"].item():.4f}'
+                postfix['cont_loss'] = f'{loss_dict["contrastive_loss"].item():.4f}'
+                postfix['cont_acc'] = f'{loss_dict["contrastive_accuracy"].item():.3f}'
+            pbar.set_postfix(postfix)
 
     avg_loss = total_loss / num_batches
+    avg_arc_loss = total_arc_loss / num_batches
+    avg_contrastive_loss = total_contrastive_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
+    avg_contrastive_accuracy = total_contrastive_accuracy / num_batches
 
-    return avg_loss, avg_accuracy
+    return {
+        'loss': avg_loss,
+        'arc_loss': avg_arc_loss,
+        'contrastive_loss': avg_contrastive_loss,
+        'accuracy': avg_accuracy,
+        'contrastive_accuracy': avg_contrastive_accuracy,
+    }
 
 
 @torch.no_grad()
-def validate(model, dataloader, device):
+def validate(model, dataloader, device, memory_bank=None):
     """Validate the model (quick version for every epoch)."""
     model.eval()
 
     total_loss = 0
+    total_arc_loss = 0
     total_accuracy = 0
     num_batches = 0
 
@@ -194,17 +234,23 @@ def validate(model, dataloader, device):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                  for k, v in batch.items()}
 
-        # Forward pass
-        loss_dict = model.compute_loss(batch)
+        # Forward pass (no memory bank update during validation)
+        loss_dict = model.compute_loss(batch, memory_bank=None)
 
         total_loss += loss_dict['loss'].item()
+        total_arc_loss += loss_dict['arc_loss'].item()
         total_accuracy += loss_dict['pixel_accuracy'].item()
         num_batches += 1
 
     avg_loss = total_loss / num_batches
+    avg_arc_loss = total_arc_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
 
-    return avg_loss, avg_accuracy
+    return {
+        'loss': avg_loss,
+        'arc_loss': avg_arc_loss,
+        'accuracy': avg_accuracy,
+    }
 
 
 @torch.no_grad()
@@ -332,7 +378,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, args, metrics, checkpoin
     print(f'Saved checkpoint to {checkpoint_path}')
 
 
-def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None):
+def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, memory_bank=None):
     """Load model checkpoint."""
     checkpoint = torch.load(checkpoint_path)
 
@@ -343,6 +389,10 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None):
 
     if scheduler is not None:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+    if memory_bank is not None and 'memory_bank_state_dict' in checkpoint:
+        memory_bank.load_state_dict(checkpoint['memory_bank_state_dict'])
+        print('Loaded memory bank from checkpoint')
 
     epoch = checkpoint['epoch']
     metrics = checkpoint['metrics']
@@ -381,11 +431,20 @@ def main():
     print("\nCreating datasets...")
     train_dataset, val_dataset = create_datasets(args)
 
+    # Create appropriate collate function
+    # Use custom collate with puzzle_id mapping for multi-task learning
+    if args.use_contrastive:
+        train_collate_fn = create_collate_fn(train_dataset.puzzle_id_to_idx)
+        val_collate_fn = create_collate_fn(val_dataset.puzzle_id_to_idx)
+    else:
+        train_collate_fn = collate_puzzle_batch
+        val_collate_fn = collate_puzzle_batch
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=collate_puzzle_batch,
+        collate_fn=train_collate_fn,
         num_workers=0,  # Set to 0 for debugging, increase for speed
     )
 
@@ -393,7 +452,7 @@ def main():
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collate_puzzle_batch,
+        collate_fn=val_collate_fn,
         num_workers=0,
     )
 
@@ -410,6 +469,23 @@ def main():
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
 
+    # Create memory bank for contrastive learning (if enabled)
+    memory_bank = None
+    if args.use_contrastive:
+        print("\nEnabling multi-task learning with contrastive loss...")
+        # Get number of unique puzzles for memory bank sizing
+        num_unique_puzzles = train_dataset.num_unique_puzzles()
+        print(f"Creating memory bank for {num_unique_puzzles} unique puzzles...")
+        print(f"  (Dataset has {len(train_dataset)} effective examples with augmentations)")
+        memory_bank = MemoryBank(
+            num_grids=num_unique_puzzles,
+            embedding_dim=128,  # contrastive_embedding_dim
+            momentum=args.memory_bank_momentum
+        ).to(device)
+        print(f"Contrastive loss weight: {args.contrastive_weight}")
+        print(f"Temperature: {args.contrastive_temperature}")
+        print(f"Num negatives: {args.contrastive_num_negatives}")
+
     # Create optimizer and scheduler
     optimizer = AdamW(
         model.parameters(),
@@ -423,7 +499,7 @@ def main():
     # Resume from checkpoint if specified
     start_epoch = 0
     if args.resume:
-        start_epoch = load_checkpoint(args.resume, model, optimizer, scheduler)
+        start_epoch = load_checkpoint(args.resume, model, optimizer, scheduler, memory_bank)
 
     # Training history
     history = {
@@ -445,25 +521,28 @@ def main():
         epoch_start_time = time.time()
 
         # Train
-        train_loss, train_accuracy = train_epoch(
-            model, train_loader, optimizer, scheduler, device, epoch, args
+        train_metrics = train_epoch(
+            model, train_loader, optimizer, scheduler, device, epoch, args, memory_bank
         )
 
         # Validate
-        val_loss, val_accuracy = validate(model, val_loader, device)
+        val_metrics = validate(model, val_loader, device, memory_bank)
 
         epoch_time = time.time() - epoch_start_time
 
         # Update history
-        history['train_loss'].append(train_loss)
-        history['train_accuracy'].append(train_accuracy)
-        history['val_loss'].append(val_loss)
-        history['val_accuracy'].append(val_accuracy)
+        history['train_loss'].append(train_metrics['loss'])
+        history['train_accuracy'].append(train_metrics['accuracy'])
+        history['val_loss'].append(val_metrics['loss'])
+        history['val_accuracy'].append(val_metrics['accuracy'])
 
         # Print epoch summary
         print(f"\nEpoch {epoch+1}/{args.num_epochs} ({epoch_time:.1f}s):")
-        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_accuracy:.4f}")
-        print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+        print(f"  Train Loss: {train_metrics['loss']:.4f}, Train Acc: {train_metrics['accuracy']:.4f}")
+        if args.use_contrastive:
+            print(f"    ARC Loss: {train_metrics['arc_loss']:.4f}, Contrastive Loss: {train_metrics['contrastive_loss']:.4f}")
+            print(f"    Contrastive Acc: {train_metrics['contrastive_accuracy']:.4f}")
+        print(f"  Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}")
 
         # Detailed evaluation (periodic)
         if (epoch + 1) % args.eval_every == 0:
@@ -492,29 +571,49 @@ def main():
         # Save checkpoint
         if (epoch + 1) % args.save_every == 0:
             metrics = {
-                'train_loss': train_loss,
-                'train_accuracy': train_accuracy,
-                'val_loss': val_loss,
-                'val_accuracy': val_accuracy,
+                'train_loss': train_metrics['loss'],
+                'train_accuracy': train_metrics['accuracy'],
+                'val_loss': val_metrics['loss'],
+                'val_accuracy': val_metrics['accuracy'],
             }
-            save_checkpoint(model, optimizer, scheduler, epoch, args, metrics, checkpoint_dir)
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'metrics': metrics,
+                'args': vars(args),
+            }
+            if memory_bank is not None:
+                checkpoint['memory_bank_state_dict'] = memory_bank.state_dict()
+
+            checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch+1}.pt'
+            torch.save(checkpoint, checkpoint_path)
+
+            # Also save as latest
+            latest_path = checkpoint_dir / 'checkpoint_latest.pt'
+            torch.save(checkpoint, latest_path)
+
+            print(f'  Saved checkpoint to {checkpoint_path}')
 
         # Save best model
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
+        if val_metrics['accuracy'] > best_val_accuracy:
+            best_val_accuracy = val_metrics['accuracy']
             best_checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'metrics': {
-                    'train_loss': train_loss,
-                    'train_accuracy': train_accuracy,
-                    'val_loss': val_loss,
-                    'val_accuracy': val_accuracy,
+                    'train_loss': train_metrics['loss'],
+                    'train_accuracy': train_metrics['accuracy'],
+                    'val_loss': val_metrics['loss'],
+                    'val_accuracy': val_metrics['accuracy'],
                 },
                 'args': vars(args),
             }
+            if memory_bank is not None:
+                best_checkpoint['memory_bank_state_dict'] = memory_bank.state_dict()
             torch.save(best_checkpoint, checkpoint_dir / 'checkpoint_best.pt')
-            print(f"  New best model! Val Acc: {val_accuracy:.4f}")
+            print(f"  New best model! Val Acc: {val_metrics['accuracy']:.4f}")
 
         # Save history
         with open(checkpoint_dir / 'history.json', 'w') as f:

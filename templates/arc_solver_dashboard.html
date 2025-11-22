@@ -412,9 +412,59 @@
                     <label class="form-label">Eval Every N Epochs</label>
                     <input type="number" id="eval_every" class="form-input" value="5">
                 </div>
+
+                <div style="grid-column: 1 / -1; margin-top: 20px; padding-top: 20px; border-top: 2px solid #2a2a3e;">
+                    <h3 style="color: #FF851B; margin-bottom: 15px;">🔥 Multi-Task Learning (Contrastive + ARC)</h3>
+                </div>
+
+                <div style="grid-column: 1 / -1;">
+                    <label style="display: flex; align-items: center; cursor: pointer;">
+                        <input type="checkbox" id="use_contrastive" style="margin-right: 10px; width: 20px; height: 20px; cursor: pointer;">
+                        <span class="form-label" style="margin: 0;">Enable Contrastive Learning (Multi-Task)</span>
+                    </label>
+                    <small style="color: #888; margin-left: 30px;">Train slot attention on both object detection and puzzle solving</small>
+                </div>
+
+                <div id="contrastive-options" style="display: none; grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; padding: 15px; background: #252538; border-radius: 8px; margin-top: 10px;">
+                    <div>
+                        <label class="form-label">Contrastive Loss Weight</label>
+                        <input type="number" id="contrastive_weight" class="form-input" value="1.0" step="0.1">
+                        <small style="color: #888;">1.0 = equal weight with ARC loss</small>
+                    </div>
+
+                    <div>
+                        <label class="form-label">Temperature</label>
+                        <input type="number" id="contrastive_temperature" class="form-input" value="0.07" step="0.01">
+                        <small style="color: #888;">Lower = sharper similarities</small>
+                    </div>
+
+                    <div>
+                        <label class="form-label">Number of Negatives</label>
+                        <input type="number" id="contrastive_num_negatives" class="form-input" value="512">
+                        <small style="color: #888;">More negatives = harder task</small>
+                    </div>
+
+                    <div>
+                        <label class="form-label">Memory Bank Momentum</label>
+                        <input type="number" id="memory_bank_momentum" class="form-input" value="0.5" step="0.1">
+                        <small style="color: #888;">0.0 = full update, 1.0 = no update</small>
+                    </div>
+                </div>
             </form>
         </div>
     </div>
+
+    <script>
+        // Toggle contrastive options visibility
+        document.addEventListener('DOMContentLoaded', () => {
+            const useContrastive = document.getElementById('use_contrastive');
+            const contrastiveOptions = document.getElementById('contrastive-options');
+
+            useContrastive.addEventListener('change', () => {
+                contrastiveOptions.style.display = useContrastive.checked ? 'grid' : 'none';
+            });
+        });
+    </script>
 
     <div class="dashboard">
         <div class="card">
@@ -446,6 +496,20 @@
                 <div class="stat">
                     <div class="stat-label">Val Accuracy</div>
                     <div class="stat-value good" id="current-val-acc">-</div>
+                </div>
+            </div>
+            <div id="contrastive-metrics" class="stats" style="display: none; margin-top: 15px; padding-top: 15px; border-top: 1px solid #2a2a3e;">
+                <div class="stat" style="border-left-color: #FF851B;">
+                    <div class="stat-label">ARC Loss</div>
+                    <div class="stat-value" id="current-arc-loss">-</div>
+                </div>
+                <div class="stat" style="border-left-color: #FF851B;">
+                    <div class="stat-label">Contrastive Loss</div>
+                    <div class="stat-value" id="current-contrastive-loss">-</div>
+                </div>
+                <div class="stat" style="border-left-color: #FF851B;">
+                    <div class="stat-label">Contrastive Accuracy</div>
+                    <div class="stat-value good" id="current-contrastive-acc">-</div>
                 </div>
             </div>
         </div>
@@ -483,6 +547,16 @@
     <div class="chart-container">
         <h2 style="color: #F012BE; margin-bottom: 15px;">Accuracy Over Time</h2>
         <div id="accuracy-chart"></div>
+    </div>
+
+    <div class="chart-container" id="contrastive-loss-chart-container" style="display: none;">
+        <h2 style="color: #FF851B; margin-bottom: 15px;">Contrastive Loss Over Time</h2>
+        <div id="contrastive-loss-chart"></div>
+    </div>
+
+    <div class="chart-container" id="contrastive-acc-chart-container" style="display: none;">
+        <h2 style="color: #FF851B; margin-bottom: 15px;">Contrastive Accuracy Over Time</h2>
+        <div id="contrastive-acc-chart"></div>
     </div>
 
     <div class="chart-container">
@@ -526,7 +600,10 @@
             train_loss: [],
             train_accuracy: [],
             val_loss: [],
-            val_accuracy: []
+            val_accuracy: [],
+            arc_loss: [],
+            contrastive_loss: [],
+            contrastive_accuracy: []
         };
 
         let configSaved = false;
@@ -553,6 +630,18 @@
 
         Plotly.newPlot('loss-chart', [], chartLayout);
         Plotly.newPlot('accuracy-chart', [], accuracyLayout);
+
+        // Initialize contrastive charts (hidden by default)
+        const contrastiveLossLayout = {
+            ...chartLayout,
+            yaxis: { title: 'Contrastive Loss', gridcolor: '#2a2a3e' }
+        };
+        const contrastiveAccLayout = {
+            ...accuracyLayout,
+            yaxis: { title: 'Contrastive Accuracy', gridcolor: '#2a2a3e' }
+        };
+        Plotly.newPlot('contrastive-loss-chart', [], contrastiveLossLayout);
+        Plotly.newPlot('contrastive-acc-chart', [], contrastiveAccLayout);
 
         function updateCharts() {
             if (trainingData.epochs.length === 0) {
@@ -629,6 +718,52 @@
                 Plotly.react('accuracy-chart', [trainAccTrace, valAccTrace], accuracyLayout);
             }
 
+            // Update contrastive charts if we have contrastive data
+            if (trainingData.contrastive_loss.some(v => v !== null && v !== undefined)) {
+                const contrastiveLossTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.contrastive_loss,
+                    name: 'Contrastive Loss',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#FF851B', width: 2 },
+                    connectgaps: false
+                };
+
+                const arcLossTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.arc_loss,
+                    name: 'ARC Loss',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#F012BE', width: 2 },
+                    connectgaps: false
+                };
+
+                const contrastiveAccTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.contrastive_accuracy,
+                    name: 'Contrastive Accuracy',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#FF851B', width: 2 },
+                    connectgaps: false
+                };
+
+                const contrastiveLossLayout = {
+                    ...chartLayout,
+                    yaxis: { title: 'Loss', gridcolor: '#2a2a3e' }
+                };
+
+                const contrastiveAccLayout = {
+                    ...accuracyLayout,
+                    yaxis: { title: 'Accuracy', gridcolor: '#2a2a3e' }
+                };
+
+                Plotly.react('contrastive-loss-chart', [arcLossTrace, contrastiveLossTrace], contrastiveLossLayout);
+                Plotly.react('contrastive-acc-chart', [contrastiveAccTrace], contrastiveAccLayout);
+            }
+
             console.log('✓ Charts updated successfully');
         }
 
@@ -654,6 +789,17 @@
             const subsetSize = document.getElementById('subset_size').value;
             if (subsetSize && subsetSize.trim() !== '') {
                 config.subset_size = parseInt(subsetSize);
+            }
+
+            // Multi-task learning (contrastive) parameters
+            const useContrastive = document.getElementById('use_contrastive').checked;
+            config.use_contrastive = useContrastive;
+
+            if (useContrastive) {
+                config.contrastive_weight = parseFloat(document.getElementById('contrastive_weight').value);
+                config.contrastive_temperature = parseFloat(document.getElementById('contrastive_temperature').value);
+                config.contrastive_num_negatives = parseInt(document.getElementById('contrastive_num_negatives').value);
+                config.memory_bank_momentum = parseFloat(document.getElementById('memory_bank_momentum').value);
             }
 
             return config;
@@ -840,7 +986,10 @@
                     train_loss: [...state.metrics.train_loss],
                     train_accuracy: [...state.metrics.train_accuracy],
                     val_loss: [...state.metrics.val_loss],
-                    val_accuracy: [...state.metrics.val_accuracy]
+                    val_accuracy: [...state.metrics.val_accuracy],
+                    arc_loss: [...(state.metrics.arc_loss || [])],
+                    contrastive_loss: [...(state.metrics.contrastive_loss || [])],
+                    contrastive_accuracy: [...(state.metrics.contrastive_accuracy || [])]
                 };
                 console.log(`📊 Loaded ${trainingData.epochs.length} historical data points from server`);
             } else {
@@ -849,7 +998,10 @@
                     train_loss: [],
                     train_accuracy: [],
                     val_loss: [],
-                    val_accuracy: []
+                    val_accuracy: [],
+                    arc_loss: [],
+                    contrastive_loss: [],
+                    contrastive_accuracy: []
                 };
                 console.log('📊 No historical data available. Starting fresh.');
             }
@@ -872,6 +1024,10 @@
                 // Val metrics are only available at epoch_complete
                 trainingData.val_loss.push(null);
                 trainingData.val_accuracy.push(null);
+                // Contrastive metrics (if available)
+                trainingData.arc_loss.push(data.arc_loss || null);
+                trainingData.contrastive_loss.push(data.contrastive_loss || null);
+                trainingData.contrastive_accuracy.push(data.contrastive_accuracy || null);
 
                 console.log(`📊 Chart data point added: step=${step}, arrays length=${trainingData.epochs.length}`);
                 console.log('  Training data:', {
@@ -883,6 +1039,18 @@
                 // Update "Current Metrics" card live
                 document.getElementById('current-train-loss').textContent = data.train_loss.toFixed(4);
                 document.getElementById('current-train-acc').textContent = (data.train_accuracy * 100).toFixed(2) + '%';
+
+                // Update contrastive metrics if available
+                if (data.arc_loss !== undefined) {
+                    document.getElementById('contrastive-metrics').style.display = 'grid';
+                    document.getElementById('current-arc-loss').textContent = data.arc_loss.toFixed(4);
+                    document.getElementById('current-contrastive-loss').textContent = data.contrastive_loss ? data.contrastive_loss.toFixed(4) : '0.0000';
+                    document.getElementById('current-contrastive-acc').textContent = data.contrastive_accuracy ? (data.contrastive_accuracy * 100).toFixed(2) + '%' : '0.00%';
+
+                    // Show contrastive charts
+                    document.getElementById('contrastive-loss-chart-container').style.display = 'block';
+                    document.getElementById('contrastive-acc-chart-container').style.display = 'block';
+                }
 
                 // Update progress within epoch
                 const totalBatches = data.total_batches || 1;

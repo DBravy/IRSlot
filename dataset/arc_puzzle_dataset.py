@@ -130,11 +130,18 @@ class ARCPuzzleDataset(Dataset):
 
             puzzles.append(puzzle)
 
+        # Create mapping from puzzle_id (string) to integer index for memory bank
+        self.puzzle_id_to_idx = {puzzle['id']: idx for idx, puzzle in enumerate(puzzles)}
+
         return puzzles
 
     def __len__(self) -> int:
         """Return effective dataset size (puzzles × augmentations)."""
         return len(self.puzzles) * self.augmentations_per_puzzle
+
+    def num_unique_puzzles(self) -> int:
+        """Return number of unique puzzles (excluding augmentations)."""
+        return len(self.puzzles)
 
     def _grid_to_tensor(self, grid: List[List[int]]) -> torch.Tensor:
         """Convert grid from list format to tensor."""
@@ -241,7 +248,31 @@ class ARCPuzzleDataset(Dataset):
         }
 
 
+def create_collate_fn(puzzle_id_to_idx: Dict[str, int]):
+    """
+    Create a collate function with access to the puzzle_id mapping.
+
+    Args:
+        puzzle_id_to_idx: Mapping from puzzle_id (str) to integer index
+
+    Returns:
+        Collate function for DataLoader
+    """
+    def collate_puzzle_batch(batch: List[Dict]) -> Dict:
+        return _collate_puzzle_batch_impl(batch, puzzle_id_to_idx)
+    return collate_puzzle_batch
+
+
 def collate_puzzle_batch(batch: List[Dict]) -> Dict:
+    """
+    Collate function for batching puzzles (without puzzle_id mapping).
+
+    For backward compatibility. Use create_collate_fn() for multi-task learning.
+    """
+    return _collate_puzzle_batch_impl(batch, None)
+
+
+def _collate_puzzle_batch_impl(batch: List[Dict], puzzle_id_to_idx: Optional[Dict[str, int]] = None) -> Dict:
     """
     Collate function for batching puzzles.
 
@@ -340,8 +371,16 @@ def collate_puzzle_batch(batch: List[Dict]) -> Dict:
         test_input_shapes.append(test_input_shapes_b)
         test_output_shapes.append(test_output_shapes_b)
 
-    return {
-        'puzzle_ids': [item['puzzle_id'] for item in batch],
+    # Create puzzle_ids list
+    puzzle_ids = [item['puzzle_id'] for item in batch]
+
+    # Convert to integer indices if mapping is provided (for memory bank)
+    puzzle_indices = None
+    if puzzle_id_to_idx is not None:
+        puzzle_indices = torch.tensor([puzzle_id_to_idx[pid] for pid in puzzle_ids], dtype=torch.long)
+
+    result = {
+        'puzzle_ids': puzzle_ids,
         'train_inputs': train_inputs,
         'train_outputs': train_outputs,
         'test_inputs': test_inputs,
@@ -356,3 +395,9 @@ def collate_puzzle_batch(batch: List[Dict]) -> Dict:
         'num_train': torch.tensor([item['num_train'] for item in batch]),
         'num_test': torch.tensor([item['num_test'] for item in batch]),
     }
+
+    # Add integer indices if available
+    if puzzle_indices is not None:
+        result['puzzle_indices'] = puzzle_indices
+
+    return result
