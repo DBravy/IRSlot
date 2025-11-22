@@ -404,6 +404,8 @@ class ARCSlotSolver(nn.Module):
         # ============================================
         contrastive_loss = torch.tensor(0.0, device=arc_loss.device)
         contrastive_accuracy = torch.tensor(0.0, device=arc_loss.device)
+        avg_positive_sim = torch.tensor(0.0, device=arc_loss.device)
+        avg_negative_sim = torch.tensor(0.0, device=arc_loss.device)
 
         if self.use_contrastive and memory_bank is not None and 'test_input_slots' in output:
             # Get test input slots
@@ -435,6 +437,8 @@ class ARCSlotSolver(nn.Module):
             )
 
             contrastive_accuracy = torch.tensor(contrastive_metrics['accuracy'], device=arc_loss.device)
+            avg_positive_sim = torch.tensor(contrastive_metrics['avg_positive_sim'], device=arc_loss.device)
+            avg_negative_sim = torch.tensor(contrastive_metrics['avg_negative_sim'], device=arc_loss.device)
 
             # Update memory bank (no gradients)
             with torch.no_grad():
@@ -454,6 +458,8 @@ class ARCSlotSolver(nn.Module):
             'contrastive_loss': contrastive_loss,
             'pixel_accuracy': pixel_accuracy,
             'contrastive_accuracy': contrastive_accuracy,
+            'avg_positive_sim': avg_positive_sim,
+            'avg_negative_sim': avg_negative_sim,
         }
 
     @torch.no_grad()

@@ -54,11 +54,13 @@ class InfoNCELoss(nn.Module):
 
         # Compute positive similarities (one per batch item)
         # [B, D] * [B, D] -> [B]
-        positive_sim = (query_embeddings * positive_embeddings).sum(dim=1) / self.temperature
+        positive_sim_raw = (query_embeddings * positive_embeddings).sum(dim=1)
+        positive_sim = positive_sim_raw / self.temperature
 
         # Compute negative similarities
         # [B, D] @ [D, N] -> [B, N]
-        negative_sim = torch.mm(query_embeddings, negative_embeddings.t()) / self.temperature
+        negative_sim_raw = torch.mm(query_embeddings, negative_embeddings.t())
+        negative_sim = negative_sim_raw / self.temperature
 
         # Combine positive and negative similarities
         # [B, 1 + N] where first column is positive
@@ -75,9 +77,10 @@ class InfoNCELoss(nn.Module):
             predictions = logits.argmax(dim=1)
             accuracy = (predictions == labels).float().mean()
 
-            # Average positive and negative similarities
-            avg_positive_sim = positive_sim.mean()
-            avg_negative_sim = negative_sim.mean()
+            # Average positive and negative similarities (use raw values before temperature scaling)
+            # These are actual cosine similarities in range [-1, 1] (typically [0, 1] for normalized embeddings)
+            avg_positive_sim = positive_sim_raw.mean()
+            avg_negative_sim = negative_sim_raw.mean()
 
         metrics = {
             'loss': loss.item(),

@@ -540,23 +540,33 @@
     </div>
 
     <div class="chart-container">
-        <h2 style="color: #F012BE; margin-bottom: 15px;">Loss Over Time</h2>
-        <div id="loss-chart"></div>
+        <h2 style="color: #F012BE; margin-bottom: 15px;">
+            Loss Over Time
+            <span style="font-size: 0.7em; color: #888; font-weight: normal; margin-left: 10px;">
+                (X-axis: Steps, where 1 step = 10 batches)
+            </span>
+        </h2>
+        <div id="loss-chart" style="width: 100%; height: 100%;"></div>
     </div>
 
     <div class="chart-container">
-        <h2 style="color: #F012BE; margin-bottom: 15px;">Accuracy Over Time</h2>
-        <div id="accuracy-chart"></div>
+        <h2 style="color: #F012BE; margin-bottom: 15px;">
+            Accuracy Over Time
+            <span style="font-size: 0.7em; color: #888; font-weight: normal; margin-left: 10px;">
+                (X-axis: Steps, where 1 step = 10 batches)
+            </span>
+        </h2>
+        <div id="accuracy-chart" style="width: 100%; height: 100%;"></div>
     </div>
 
-    <div class="chart-container" id="contrastive-loss-chart-container" style="display: none;">
-        <h2 style="color: #FF851B; margin-bottom: 15px;">Contrastive Loss Over Time</h2>
-        <div id="contrastive-loss-chart"></div>
-    </div>
-
-    <div class="chart-container" id="contrastive-acc-chart-container" style="display: none;">
-        <h2 style="color: #FF851B; margin-bottom: 15px;">Contrastive Accuracy Over Time</h2>
-        <div id="contrastive-acc-chart"></div>
+    <div class="chart-container" id="similarity-chart-container" style="display: none;">
+        <h2 style="color: #667eea; margin-bottom: 15px;">
+            Similarity Scores Over Time
+            <span style="font-size: 0.7em; color: #888; font-weight: normal; margin-left: 10px;">
+                (X-axis: Steps, where 1 step = 10 batches)
+            </span>
+        </h2>
+        <div id="similarity-chart" style="width: 100%; height: 100%;"></div>
     </div>
 
     <div class="chart-container">
@@ -603,11 +613,18 @@
             val_accuracy: [],
             arc_loss: [],
             contrastive_loss: [],
-            contrastive_accuracy: []
+            contrastive_accuracy: [],
+            positive_similarity: [],
+            negative_similarity: []
         };
 
         let configSaved = false;
         let chartsInitialized = false;
+        let contrastiveChartsInitialized = false;
+
+        // Configuration for data management (like instance recognition dashboard)
+        const MAX_DATA_POINTS = 2000;
+        const DOWNSAMPLE_THRESHOLD = 1500;
 
         // Initialize charts
         const chartLayout = {
@@ -616,7 +633,8 @@
             font: { color: '#e0e0e0' },
             xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
             yaxis: { title: 'Loss', gridcolor: '#2a2a3e' },
-            legend: { x: 0.1, y: 1.1, orientation: 'h' }
+            legend: { x: 0.1, y: 1.1, orientation: 'h' },
+            autosize: true
         };
 
         const accuracyLayout = {
@@ -625,23 +643,25 @@
             font: { color: '#e0e0e0' },
             xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
             yaxis: { title: 'Accuracy', gridcolor: '#2a2a3e' },
-            legend: { x: 0.1, y: 1.1, orientation: 'h' }
+            legend: { x: 0.1, y: 1.1, orientation: 'h' },
+            autosize: true
         };
 
-        Plotly.newPlot('loss-chart', [], chartLayout);
-        Plotly.newPlot('accuracy-chart', [], accuracyLayout);
+        const similarityLayout = {
+            paper_bgcolor: '#1a1a2e',
+            plot_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' },
+            xaxis: { title: 'Training Step (1 step = 10 batches)', gridcolor: '#2a2a3e' },
+            yaxis: { title: 'Similarity', gridcolor: '#2a2a3e', range: [0, 1] },
+            legend: { x: 0.1, y: 1.1, orientation: 'h' },
+            autosize: true
+        };
 
-        // Initialize contrastive charts (hidden by default)
-        const contrastiveLossLayout = {
-            ...chartLayout,
-            yaxis: { title: 'Contrastive Loss', gridcolor: '#2a2a3e' }
-        };
-        const contrastiveAccLayout = {
-            ...accuracyLayout,
-            yaxis: { title: 'Contrastive Accuracy', gridcolor: '#2a2a3e' }
-        };
-        Plotly.newPlot('contrastive-loss-chart', [], contrastiveLossLayout);
-        Plotly.newPlot('contrastive-acc-chart', [], contrastiveAccLayout);
+        const chartConfig = { responsive: true };
+
+        Plotly.newPlot('loss-chart', [], chartLayout, chartConfig);
+        Plotly.newPlot('accuracy-chart', [], accuracyLayout, chartConfig);
+        Plotly.newPlot('similarity-chart', [], similarityLayout, chartConfig);
 
         function updateCharts() {
             if (trainingData.epochs.length === 0) {
@@ -651,7 +671,11 @@
 
             console.log(`📊 Updating charts with ${trainingData.epochs.length} data points`);
 
-            const trainLossTrace = {
+            // Build loss traces
+            const lossTraces = [];
+
+            // Train loss (always present)
+            lossTraces.push({
                 x: trainingData.epochs,
                 y: trainingData.train_loss,
                 name: 'Train Loss',
@@ -659,9 +683,9 @@
                 mode: 'lines',
                 line: { color: '#f87171', width: 2 },
                 connectgaps: false
-            };
+            });
 
-            // Filter out null values for validation traces
+            // Val loss (filter nulls)
             const valLossX = [];
             const valLossY = [];
             for (let i = 0; i < trainingData.epochs.length; i++) {
@@ -670,17 +694,45 @@
                     valLossY.push(trainingData.val_loss[i]);
                 }
             }
-
-            const valLossTrace = {
+            lossTraces.push({
                 x: valLossX,
                 y: valLossY,
                 name: 'Val Loss',
                 type: 'scatter',
                 mode: 'lines',
                 line: { color: '#FF851B', width: 2 }
-            };
+            });
 
-            const trainAccTrace = {
+            // Add contrastive losses if available
+            if (trainingData.arc_loss.some(v => v !== null && v !== undefined)) {
+                lossTraces.push({
+                    x: trainingData.epochs,
+                    y: trainingData.arc_loss,
+                    name: 'ARC Loss',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#F012BE', width: 2 },
+                    connectgaps: false
+                });
+            }
+
+            if (trainingData.contrastive_loss.some(v => v !== null && v !== undefined)) {
+                lossTraces.push({
+                    x: trainingData.epochs,
+                    y: trainingData.contrastive_loss,
+                    name: 'Contrastive Loss',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#667eea', width: 2 },
+                    connectgaps: false
+                });
+            }
+
+            // Build accuracy traces
+            const accTraces = [];
+
+            // Train accuracy (always present)
+            accTraces.push({
                 x: trainingData.epochs,
                 y: trainingData.train_accuracy,
                 name: 'Train Accuracy',
@@ -688,8 +740,9 @@
                 mode: 'lines',
                 line: { color: '#4ade80', width: 2 },
                 connectgaps: false
-            };
+            });
 
+            // Val accuracy (filter nulls)
             const valAccX = [];
             const valAccY = [];
             for (let i = 0; i < trainingData.epochs.length; i++) {
@@ -698,73 +751,270 @@
                     valAccY.push(trainingData.val_accuracy[i]);
                 }
             }
-
-            const valAccTrace = {
+            accTraces.push({
                 x: valAccX,
                 y: valAccY,
                 name: 'Val Accuracy',
                 type: 'scatter',
                 mode: 'lines',
                 line: { color: '#2ECC40', width: 2 }
-            };
+            });
 
-            if (!chartsInitialized) {
-                console.log('📊 Initializing charts for the first time');
-                Plotly.newPlot('loss-chart', [trainLossTrace, valLossTrace], chartLayout);
-                Plotly.newPlot('accuracy-chart', [trainAccTrace, valAccTrace], accuracyLayout);
-                chartsInitialized = true;
-            } else {
-                Plotly.react('loss-chart', [trainLossTrace, valLossTrace], chartLayout);
-                Plotly.react('accuracy-chart', [trainAccTrace, valAccTrace], accuracyLayout);
-            }
-
-            // Update contrastive charts if we have contrastive data
-            if (trainingData.contrastive_loss.some(v => v !== null && v !== undefined)) {
-                const contrastiveLossTrace = {
-                    x: trainingData.epochs,
-                    y: trainingData.contrastive_loss,
-                    name: 'Contrastive Loss',
-                    type: 'scatter',
-                    mode: 'lines',
-                    line: { color: '#FF851B', width: 2 },
-                    connectgaps: false
-                };
-
-                const arcLossTrace = {
-                    x: trainingData.epochs,
-                    y: trainingData.arc_loss,
-                    name: 'ARC Loss',
-                    type: 'scatter',
-                    mode: 'lines',
-                    line: { color: '#F012BE', width: 2 },
-                    connectgaps: false
-                };
-
-                const contrastiveAccTrace = {
+            // Add contrastive accuracy if available
+            if (trainingData.contrastive_accuracy.some(v => v !== null && v !== undefined)) {
+                accTraces.push({
                     x: trainingData.epochs,
                     y: trainingData.contrastive_accuracy,
                     name: 'Contrastive Accuracy',
                     type: 'scatter',
                     mode: 'lines',
-                    line: { color: '#FF851B', width: 2 },
+                    line: { color: '#667eea', width: 2 },
                     connectgaps: false
-                };
+                });
+            }
 
-                const contrastiveLossLayout = {
-                    ...chartLayout,
-                    yaxis: { title: 'Loss', gridcolor: '#2a2a3e' }
-                };
+            if (!chartsInitialized) {
+                console.log('📊 Initializing charts for the first time');
+                Plotly.newPlot('loss-chart', lossTraces, chartLayout);
+                Plotly.newPlot('accuracy-chart', accTraces, accuracyLayout);
+                chartsInitialized = true;
+            } else {
+                Plotly.react('loss-chart', lossTraces, chartLayout);
+                Plotly.react('accuracy-chart', accTraces, accuracyLayout);
+            }
 
-                const contrastiveAccLayout = {
-                    ...accuracyLayout,
-                    yaxis: { title: 'Accuracy', gridcolor: '#2a2a3e' }
-                };
+            // Build similarity traces (if available)
+            if (trainingData.positive_similarity.some(v => v !== null && v !== undefined)) {
+                const simTraces = [];
 
-                Plotly.react('contrastive-loss-chart', [arcLossTrace, contrastiveLossTrace], contrastiveLossLayout);
-                Plotly.react('contrastive-acc-chart', [contrastiveAccTrace], contrastiveAccLayout);
+                simTraces.push({
+                    x: trainingData.epochs,
+                    y: trainingData.positive_similarity,
+                    name: 'Positive Similarity',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#4ade80', width: 2 },
+                    connectgaps: false
+                });
+
+                simTraces.push({
+                    x: trainingData.epochs,
+                    y: trainingData.negative_similarity,
+                    name: 'Negative Similarity',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#f87171', width: 2 },
+                    connectgaps: false
+                });
+
+                // Show similarity chart container
+                document.getElementById('similarity-chart-container').style.display = 'block';
+
+                // Update similarity chart
+                Plotly.react('similarity-chart', simTraces, similarityLayout);
             }
 
             console.log('✓ Charts updated successfully');
+        }
+
+        // Downsample data when it gets too large (from instance recognition dashboard)
+        function downsampleData() {
+            if (trainingData.epochs.length <= DOWNSAMPLE_THRESHOLD) {
+                return;
+            }
+
+            console.log(`📉 Downsampling data from ${trainingData.epochs.length} points...`);
+
+            const recentCount = 500;
+            const oldDataLength = trainingData.epochs.length - recentCount;
+
+            if (oldDataLength > 0) {
+                const downsampledEpochs = [];
+                const downsampledTrainLoss = [];
+                const downsampledTrainAcc = [];
+                const downsampledValLoss = [];
+                const downsampledValAcc = [];
+                const downsampledArcLoss = [];
+                const downsampledContLoss = [];
+                const downsampledContAcc = [];
+
+                // Keep every other point from old data
+                for (let i = 0; i < oldDataLength; i += 2) {
+                    downsampledEpochs.push(trainingData.epochs[i]);
+                    downsampledTrainLoss.push(trainingData.train_loss[i]);
+                    downsampledTrainAcc.push(trainingData.train_accuracy[i]);
+                    downsampledValLoss.push(trainingData.val_loss[i]);
+                    downsampledValAcc.push(trainingData.val_accuracy[i]);
+                    downsampledArcLoss.push(trainingData.arc_loss[i]);
+                    downsampledContLoss.push(trainingData.contrastive_loss[i]);
+                    downsampledContAcc.push(trainingData.contrastive_accuracy[i]);
+                }
+
+                const downsampledPosSim = [];
+                const downsampledNegSim = [];
+                for (let i = 0; i < oldDataLength; i += 2) {
+                    downsampledPosSim.push(trainingData.positive_similarity[i]);
+                    downsampledNegSim.push(trainingData.negative_similarity[i]);
+                }
+
+                // Keep all recent data
+                const recentStartIdx = trainingData.epochs.length - recentCount;
+                for (let i = recentStartIdx; i < trainingData.epochs.length; i++) {
+                    downsampledEpochs.push(trainingData.epochs[i]);
+                    downsampledTrainLoss.push(trainingData.train_loss[i]);
+                    downsampledTrainAcc.push(trainingData.train_accuracy[i]);
+                    downsampledValLoss.push(trainingData.val_loss[i]);
+                    downsampledValAcc.push(trainingData.val_accuracy[i]);
+                    downsampledArcLoss.push(trainingData.arc_loss[i]);
+                    downsampledContLoss.push(trainingData.contrastive_loss[i]);
+                    downsampledContAcc.push(trainingData.contrastive_accuracy[i]);
+                    downsampledPosSim.push(trainingData.positive_similarity[i]);
+                    downsampledNegSim.push(trainingData.negative_similarity[i]);
+                }
+
+                // Replace data
+                trainingData.epochs = downsampledEpochs;
+                trainingData.train_loss = downsampledTrainLoss;
+                trainingData.train_accuracy = downsampledTrainAcc;
+                trainingData.val_loss = downsampledValLoss;
+                trainingData.val_accuracy = downsampledValAcc;
+                trainingData.arc_loss = downsampledArcLoss;
+                trainingData.contrastive_loss = downsampledContLoss;
+                trainingData.contrastive_accuracy = downsampledContAcc;
+                trainingData.positive_similarity = downsampledPosSim;
+                trainingData.negative_similarity = downsampledNegSim;
+
+                console.log(`✓ Downsampled to ${trainingData.epochs.length} points`);
+            }
+        }
+
+        // Extend charts with new data point (incremental update - much faster)
+        function extendCharts(step, trainLoss, trainAcc, arcLoss, contLoss, contAcc, posSim, negSim) {
+            if (!chartsInitialized) {
+                // If charts aren't initialized yet, just update the full chart
+                updateCharts();
+                return;
+            }
+
+            try {
+                // Determine which traces exist and build the extend data
+
+                // Loss chart: [Train Loss, Val Loss, ARC Loss?, Contrastive Loss?]
+                const lossX = [[step], [step]];  // Train and Val always present
+                const lossY = [[trainLoss], [null]];  // Val is null during training
+                const lossIndices = [0, 1];  // Train and Val indices
+
+                // Add contrastive traces if they exist
+                if (!contrastiveChartsInitialized && arcLoss !== null && contLoss !== null) {
+                    // First contrastive data point - add new traces
+                    const arcLossTrace = {
+                        x: [step],
+                        y: [arcLoss],
+                        name: 'ARC Loss',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { color: '#F012BE', width: 2 }
+                    };
+
+                    const contLossTrace = {
+                        x: [step],
+                        y: [contLoss],
+                        name: 'Contrastive Loss',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { color: '#667eea', width: 2 }
+                    };
+
+                    Plotly.addTraces('loss-chart', [arcLossTrace, contLossTrace]);
+                    contrastiveChartsInitialized = true;
+                } else if (contrastiveChartsInitialized && arcLoss !== null && contLoss !== null) {
+                    // Contrastive traces already exist - extend them
+                    lossX.push([step], [step]);
+                    lossY.push([arcLoss], [contLoss]);
+                    lossIndices.push(2, 3);  // ARC and Contrastive at indices 2, 3
+                }
+
+                // Extend loss chart
+                Plotly.extendTraces('loss-chart', {
+                    x: lossX,
+                    y: lossY
+                }, lossIndices);
+
+                // Accuracy chart: [Train Acc, Val Acc, Contrastive Acc?]
+                const accX = [[step], [step]];  // Train and Val always present
+                const accY = [[trainAcc], [null]];  // Val is null during training
+                const accIndices = [0, 1];  // Train and Val indices
+
+                // Add contrastive accuracy if it exists
+                if (contrastiveChartsInitialized && contAcc !== null) {
+                    // Check if we already added the contrastive accuracy trace
+                    if (trainingData.contrastive_accuracy.filter(v => v !== null).length === 1) {
+                        // First contrastive accuracy point - add new trace
+                        const contAccTrace = {
+                            x: [step],
+                            y: [contAcc],
+                            name: 'Contrastive Accuracy',
+                            type: 'scatter',
+                            mode: 'lines',
+                            line: { color: '#667eea', width: 2 }
+                        };
+                        Plotly.addTraces('accuracy-chart', [contAccTrace]);
+                    } else {
+                        // Contrastive accuracy trace already exists - extend it
+                        accX.push([step]);
+                        accY.push([contAcc]);
+                        accIndices.push(2);  // Contrastive at index 2
+                    }
+                }
+
+                // Extend accuracy chart
+                Plotly.extendTraces('accuracy-chart', {
+                    x: accX,
+                    y: accY
+                }, accIndices);
+
+                // Similarity chart (if available)
+                if (posSim !== null && negSim !== null) {
+                    // Check if this is the first similarity data point
+                    const hasSimData = trainingData.positive_similarity.some(v => v !== null && v !== undefined);
+
+                    if (!hasSimData) {
+                        // First similarity data - create traces
+                        const posSimTrace = {
+                            x: [step],
+                            y: [posSim],
+                            name: 'Positive Similarity',
+                            type: 'scatter',
+                            mode: 'lines',
+                            line: { color: '#4ade80', width: 2 }
+                        };
+
+                        const negSimTrace = {
+                            x: [step],
+                            y: [negSim],
+                            name: 'Negative Similarity',
+                            type: 'scatter',
+                            mode: 'lines',
+                            line: { color: '#f87171', width: 2 }
+                        };
+
+                        Plotly.newPlot('similarity-chart', [posSimTrace, negSimTrace], similarityLayout, chartConfig);
+                        document.getElementById('similarity-chart-container').style.display = 'block';
+                    } else {
+                        // Extend existing similarity traces
+                        Plotly.extendTraces('similarity-chart', {
+                            x: [[step], [step]],
+                            y: [[posSim], [negSim]]
+                        }, [0, 1]);
+                    }
+                }
+
+            } catch (error) {
+                console.error('❌ Error extending charts:', error);
+                console.error('  Stack trace:', error.stack);
+                // Fallback to full update if extend fails
+                updateCharts();
+            }
         }
 
         function getConfigFromForm() {
@@ -979,6 +1229,10 @@
             console.log('Initial state:', state);
             updateUI(state);
 
+            // Reset chart initialization flags
+            chartsInitialized = false;
+            contrastiveChartsInitialized = false;
+
             // Load historical training data from state if available
             if (state.metrics && state.metrics.epochs && state.metrics.epochs.length > 0) {
                 trainingData = {
@@ -989,7 +1243,9 @@
                     val_accuracy: [...state.metrics.val_accuracy],
                     arc_loss: [...(state.metrics.arc_loss || [])],
                     contrastive_loss: [...(state.metrics.contrastive_loss || [])],
-                    contrastive_accuracy: [...(state.metrics.contrastive_accuracy || [])]
+                    contrastive_accuracy: [...(state.metrics.contrastive_accuracy || [])],
+                    positive_similarity: [...(state.metrics.positive_similarity || [])],
+                    negative_similarity: [...(state.metrics.negative_similarity || [])]
                 };
                 console.log(`📊 Loaded ${trainingData.epochs.length} historical data points from server`);
             } else {
@@ -1001,7 +1257,9 @@
                     val_accuracy: [],
                     arc_loss: [],
                     contrastive_loss: [],
-                    contrastive_accuracy: []
+                    contrastive_accuracy: [],
+                    positive_similarity: [],
+                    negative_similarity: []
                 };
                 console.log('📊 No historical data available. Starting fresh.');
             }
@@ -1028,6 +1286,8 @@
                 trainingData.arc_loss.push(data.arc_loss || null);
                 trainingData.contrastive_loss.push(data.contrastive_loss || null);
                 trainingData.contrastive_accuracy.push(data.contrastive_accuracy || null);
+                trainingData.positive_similarity.push(data.avg_positive_sim || null);
+                trainingData.negative_similarity.push(data.avg_negative_sim || null);
 
                 console.log(`📊 Chart data point added: step=${step}, arrays length=${trainingData.epochs.length}`);
                 console.log('  Training data:', {
@@ -1046,10 +1306,6 @@
                     document.getElementById('current-arc-loss').textContent = data.arc_loss.toFixed(4);
                     document.getElementById('current-contrastive-loss').textContent = data.contrastive_loss ? data.contrastive_loss.toFixed(4) : '0.0000';
                     document.getElementById('current-contrastive-acc').textContent = data.contrastive_accuracy ? (data.contrastive_accuracy * 100).toFixed(2) + '%' : '0.00%';
-
-                    // Show contrastive charts
-                    document.getElementById('contrastive-loss-chart-container').style.display = 'block';
-                    document.getElementById('contrastive-acc-chart-container').style.display = 'block';
                 }
 
                 // Update progress within epoch
@@ -1063,9 +1319,22 @@
                 document.getElementById('progress-fill').style.width = `${epochProgress}%`;
                 document.getElementById('progress-fill').textContent = `${epochProgress.toFixed(1)}%`;
 
-                // Update charts
-                console.log('  Calling updateCharts()...');
-                updateCharts();
+                // Use incremental chart update for better performance
+                const arcLoss = data.arc_loss || null;
+                const contLoss = data.contrastive_loss || null;
+                const contAcc = data.contrastive_accuracy || null;
+                const posSim = data.avg_positive_sim || null;
+                const negSim = data.avg_negative_sim || null;
+
+                console.log('  Calling extendCharts()...');
+                extendCharts(step, data.train_loss, data.train_accuracy, arcLoss, contLoss, contAcc, posSim, negSim);
+
+                // Downsample if we have too many points
+                if (trainingData.epochs.length > MAX_DATA_POINTS) {
+                    downsampleData();
+                    // After downsampling, do a full redraw
+                    updateCharts();
+                }
             } catch (error) {
                 console.error('❌ Error in batch_update handler:', error);
                 console.error('  Stack trace:', error.stack);
@@ -1093,6 +1362,34 @@
 
         socket.on('status_changed', (state) => {
             console.log('Status changed:', state.status);
+
+            // If status is 'running' and metrics are empty, we're starting fresh training
+            // Clear chart data to avoid connecting old data to new data
+            if (state.status === 'running' &&
+                state.metrics &&
+                state.metrics.epochs &&
+                state.metrics.epochs.length === 0) {
+                console.log('🔄 Fresh training start detected - clearing chart data');
+                trainingData.epochs = [];
+                trainingData.train_loss = [];
+                trainingData.train_accuracy = [];
+                trainingData.val_loss = [];
+                trainingData.val_accuracy = [];
+                trainingData.arc_loss = [];
+                trainingData.contrastive_loss = [];
+                trainingData.contrastive_accuracy = [];
+                trainingData.positive_similarity = [];
+                trainingData.negative_similarity = [];
+                chartsInitialized = false;
+                contrastiveChartsInitialized = false;
+
+                // Clear the charts visually
+                Plotly.newPlot('loss-chart', [], chartLayout);
+                Plotly.newPlot('accuracy-chart', [], accuracyLayout);
+                Plotly.newPlot('similarity-chart', [], similarityLayout);
+                document.getElementById('similarity-chart-container').style.display = 'none';
+            }
+
             updateUI(state);
         });
 

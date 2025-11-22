@@ -1157,6 +1157,8 @@ def train_arc_solver_epoch(epoch):
     total_contrastive_loss = 0.0
     total_accuracy = 0.0
     total_contrastive_accuracy = 0.0
+    total_pos_sim = 0.0
+    total_neg_sim = 0.0
     num_batches = 0
 
     # Calculate batch_log_interval (default 10 batches per step)
@@ -1167,6 +1169,8 @@ def train_arc_solver_epoch(epoch):
     # Track metrics for averaging over the step interval
     step_loss = 0.0
     step_accuracy = 0.0
+    step_pos_sim = 0.0
+    step_neg_sim = 0.0
     step_batch_count = 0
 
     for batch_idx, batch in enumerate(train_loader):
@@ -1201,11 +1205,15 @@ def train_arc_solver_epoch(epoch):
         total_contrastive_loss += loss_dict['contrastive_loss'].item()
         total_accuracy += accuracy.item()
         total_contrastive_accuracy += loss_dict['contrastive_accuracy'].item()
+        total_pos_sim += loss_dict['avg_positive_sim'].item()
+        total_neg_sim += loss_dict['avg_negative_sim'].item()
         num_batches += 1
 
         # Accumulate metrics for the current step
         step_loss += loss.item()
         step_accuracy += accuracy.item()
+        step_pos_sim += loss_dict['avg_positive_sim'].item()
+        step_neg_sim += loss_dict['avg_negative_sim'].item()
         step_batch_count += 1
 
         # Send batch update every N batches
@@ -1216,6 +1224,8 @@ def train_arc_solver_epoch(epoch):
             # Average the metrics over the step interval
             avg_step_loss = step_loss / step_batch_count if step_batch_count > 0 else 0.0
             avg_step_accuracy = step_accuracy / step_batch_count if step_batch_count > 0 else 0.0
+            avg_step_pos_sim = step_pos_sim / step_batch_count if step_batch_count > 0 else 0.0
+            avg_step_neg_sim = step_neg_sim / step_batch_count if step_batch_count > 0 else 0.0
 
             emission_count += 1
             print(f"Emitting batch_update #{emission_count}: epoch={epoch}, batch={batch_idx + 1}/{len(train_loader)}, step={current_step}, loss={avg_step_loss:.4f}")
@@ -1236,6 +1246,8 @@ def train_arc_solver_epoch(epoch):
                     batch_update_data['arc_loss'] = loss_dict['arc_loss'].item()
                     batch_update_data['contrastive_loss'] = loss_dict['contrastive_loss'].item()
                     batch_update_data['contrastive_accuracy'] = loss_dict['contrastive_accuracy'].item()
+                    batch_update_data['avg_positive_sim'] = avg_step_pos_sim
+                    batch_update_data['avg_negative_sim'] = avg_step_neg_sim
 
                 socketio.emit('batch_update', batch_update_data, namespace=arc_solver_namespace)
                 socketio.sleep(0.001)
@@ -1245,6 +1257,8 @@ def train_arc_solver_epoch(epoch):
             # Reset step metrics for next interval
             step_loss = 0.0
             step_accuracy = 0.0
+            step_pos_sim = 0.0
+            step_neg_sim = 0.0
             step_batch_count = 0
 
         # Generate attention visualizations every 10 batches
@@ -1447,6 +1461,8 @@ def train_arc_solver_epoch(epoch):
     avg_contrastive_loss = total_contrastive_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
     avg_contrastive_accuracy = total_contrastive_accuracy / num_batches
+    avg_pos_sim = total_pos_sim / num_batches
+    avg_neg_sim = total_neg_sim / num_batches
 
     return {
         'train_loss': avg_loss,
@@ -1454,6 +1470,8 @@ def train_arc_solver_epoch(epoch):
         'arc_loss': avg_arc_loss,
         'contrastive_loss': avg_contrastive_loss,
         'contrastive_accuracy': avg_contrastive_accuracy,
+        'avg_positive_sim': avg_pos_sim,
+        'avg_negative_sim': avg_neg_sim,
     }
 
 
