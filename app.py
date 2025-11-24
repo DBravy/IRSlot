@@ -437,6 +437,20 @@ def train_epoch(epoch):
             batch_history['pos_sim'].append(safe_pos_sim)
             batch_history['neg_sim'].append(safe_neg_sim)
 
+            # Apply mild downsampling to prevent unbounded memory growth
+            # Keep last 2000 points at full resolution, downsample older data
+            if len(batch_history['steps']) > 2000:
+                # Downsample: keep every 5th point from the older data
+                for key in batch_history.keys():
+                    old_part = batch_history[key][:-2000]  # Everything except last 2000
+                    recent_part = batch_history[key][-2000:]  # Last 2000 at full resolution
+
+                    # Only keep every 5th point from old data (mild downsampling)
+                    downsampled = old_part[::5]
+
+                    # Reconstruct: downsampled old + full resolution recent
+                    batch_history[key] = downsampled + recent_part
+
             try:
                 socketio.emit('batch_update', {
                     'epoch': epoch,
