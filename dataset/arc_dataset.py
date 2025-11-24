@@ -81,7 +81,7 @@ class ARCInstanceDataset(Dataset):
         if augment:
             self.augmentation = ARCGridAugmentation(
                 apply_rotation=True,
-                apply_color_permutation=True
+                apply_color_permutation=False
             )
         else:
             self.augmentation = None
@@ -161,8 +161,8 @@ class ARCInstanceDataset(Dataset):
         if self.augmentation is not None:
             grid = self.augmentation(grid)
 
-        # Convert to tensor
-        grid = torch.from_numpy(grid).long()
+        # Convert to tensor (copy needed for negative strides from flips)
+        grid = torch.from_numpy(grid.copy()).long()
 
         return {
             'grid_id': grid_id,

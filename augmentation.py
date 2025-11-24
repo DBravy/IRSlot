@@ -82,7 +82,7 @@ class MultiViewAugmentation:
         self.n_views = n_views
         self.augmentation = ARCGridAugmentation(
             apply_rotation=True,
-            apply_color_permutation=True
+            apply_color_permutation=False
         )
 
     def __call__(self, grid):
