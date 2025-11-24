@@ -6,6 +6,85 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class ColorEntropyLoss(nn.Module):
+    """
+    Regularization loss that encourages each slot to attend to color-coherent regions.
+
+    For each slot, computes the weighted color distribution based on attention weights,
+    then penalizes high entropy (encouraging slots to specialize on fewer colors).
+    """
+    def __init__(self, num_colors=10, eps=1e-8):
+        """
+        Args:
+            num_colors: Number of possible colors (10 for ARC: 0-9)
+            eps: Small constant for numerical stability
+        """
+        super().__init__()
+        self.num_colors = num_colors
+        self.eps = eps
+
+    def forward(self, attn_weights, grids):
+        """
+        Compute color entropy regularization loss.
+
+        Args:
+            attn_weights: [B, num_slots, H, W] - Attention masks from slot attention
+            grids: [B, H, W] - Original grids with color values 0-9
+
+        Returns:
+            loss: Scalar tensor - Mean entropy across all slots (to minimize)
+            metrics: Dict with additional metrics for logging
+        """
+        B, num_slots, H, W = attn_weights.shape
+
+        # Flatten spatial dimensions
+        # attn: [B, num_slots, H*W]
+        attn_flat = attn_weights.reshape(B, num_slots, -1)
+
+        # grids: [B, H*W]
+        grids_flat = grids.reshape(B, -1)
+
+        # Create one-hot encoding of colors: [B, H*W, num_colors]
+        colors_onehot = F.one_hot(grids_flat.long(), num_classes=self.num_colors).float()
+
+        # For each slot, compute weighted color distribution
+        # attn_flat: [B, num_slots, H*W]
+        # colors_onehot: [B, H*W, num_colors]
+        # Result: [B, num_slots, num_colors]
+        #
+        # We want: for each slot, sum(attn * color_onehot) across spatial positions
+        # attn_flat.unsqueeze(-1): [B, num_slots, H*W, 1]
+        # colors_onehot.unsqueeze(1): [B, 1, H*W, num_colors]
+        # Product: [B, num_slots, H*W, num_colors]
+        # Sum over H*W: [B, num_slots, num_colors]
+
+        color_dist = torch.einsum('bsh,bhc->bsc', attn_flat, colors_onehot)
+
+        # Normalize to get probability distribution (attention is already normalized,
+        # but we normalize again to be safe)
+        color_dist = color_dist / (color_dist.sum(dim=-1, keepdim=True) + self.eps)
+
+        # Compute entropy: -sum(p * log(p))
+        # Add eps to avoid log(0)
+        entropy = -torch.sum(color_dist * torch.log(color_dist + self.eps), dim=-1)
+
+        # Mean entropy across batch and slots
+        mean_entropy = entropy.mean()
+
+        # Max possible entropy for reference (uniform over num_colors)
+        max_entropy = torch.log(torch.tensor(self.num_colors, dtype=torch.float32, device=grids.device))
+
+        # Normalized entropy (0 = perfect coherence, 1 = uniform)
+        normalized_entropy = mean_entropy / max_entropy
+
+        metrics = {
+            'color_entropy': mean_entropy.item(),
+            'color_entropy_normalized': normalized_entropy.item(),
+        }
+
+        return mean_entropy, metrics
+
+
 class InfoNCELoss(nn.Module):
     """
     InfoNCE (Normalized Temperature-scaled Cross Entropy) Loss.

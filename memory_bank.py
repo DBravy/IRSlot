@@ -11,7 +11,7 @@ class MemoryBank(nn.Module):
 
     Uses momentum updates to slowly incorporate new embeddings.
     """
-    def __init__(self, num_grids, embedding_dim, momentum=0.5):
+    def __init__(self, num_grids, embedding_dim, momentum=0.99):
         """
         Args:
             num_grids: Total number of unique grids in dataset

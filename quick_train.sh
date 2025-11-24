@@ -43,12 +43,12 @@ echo ""
 python train.py \
     --data_dir "$DATA_DIR" \
     --num_slots 7 \
-    --slot_dim 64 \
+    --slot_dim 32 \
     --embedding_dim 128 \
     --batch_size 32 \
     --num_epochs 100 \
     --lr 1e-4 \
-    --momentum 0.5 \
+    --momentum 0.99 \
     --temperature 0.07 \
     --num_negatives 2048 \
     --checkpoint_dir "$CHECKPOINT_DIR" \

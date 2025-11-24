@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 
 from model import SlotInstanceModel
 from memory_bank import MemoryBank
-from loss import InfoNCELoss
+from loss import InfoNCELoss, ColorEntropyLoss
 from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
 
 # Flask app
@@ -74,6 +74,8 @@ training_components = {
     'model': None,
     'memory_bank': None,
     'criterion': None,
+    'color_entropy_loss': None,
+    'color_entropy_weight': 0.1,
     'optimizer': None,
     'dataloader': None,
     'device': None,
@@ -282,6 +284,8 @@ def initialize_training(config):
 
     # Loss and optimizer
     criterion = InfoNCELoss(temperature=config['temperature'])
+    color_entropy_loss = ColorEntropyLoss(num_colors=10)
+    color_entropy_weight = config.get('color_entropy_weight', 0.1)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config['lr'],
@@ -293,6 +297,8 @@ def initialize_training(config):
         'model': model,
         'memory_bank': memory_bank,
         'criterion': criterion,
+        'color_entropy_loss': color_entropy_loss,
+        'color_entropy_weight': color_entropy_weight,
         'optimizer': optimizer,
         'dataloader': dataloader,
         'device': device,
@@ -339,6 +345,8 @@ def train_epoch(epoch):
     model = training_components['model']
     memory_bank = training_components['memory_bank']
     criterion = training_components['criterion']
+    color_entropy_criterion = training_components['color_entropy_loss']
+    color_entropy_weight = training_components['color_entropy_weight']
     optimizer = training_components['optimizer']
     dataloader = training_components['dataloader']
     device = training_components['device']
@@ -349,6 +357,7 @@ def train_epoch(epoch):
     total_accuracy = 0.0
     total_pos_sim = 0.0
     total_neg_sim = 0.0
+    total_color_entropy = 0.0
     num_batches = 0
 
     # Calculate batch_log_interval once before the loop
@@ -376,16 +385,22 @@ def train_epoch(epoch):
         grid_ids = batch['grid_ids'].to(device)
         grids = batch['grids'].to(device)
 
-        # Forward pass
-        embeddings, slots = model(grids)
+        # Forward pass (with attention weights for color entropy)
+        embeddings, slots, attn_weights = model(grids, return_attn=True)
         stored_embeddings = memory_bank.get(grid_ids)
         negative_embeddings = memory_bank.sample_negatives(
             num_negatives=config['num_negatives'],
             exclude_ids=grid_ids
         )
 
-        # Compute loss
-        loss, metrics = criterion(embeddings, stored_embeddings, negative_embeddings)
+        # Compute contrastive loss
+        contrastive_loss, metrics = criterion(embeddings, stored_embeddings, negative_embeddings)
+
+        # Compute color entropy loss
+        entropy_loss, entropy_metrics = color_entropy_criterion(attn_weights, grids)
+
+        # Combined loss
+        loss = contrastive_loss + color_entropy_weight * entropy_loss
 
         # Backward pass
         optimizer.zero_grad()
@@ -396,14 +411,15 @@ def train_epoch(epoch):
         memory_bank.update(grid_ids, embeddings.detach())
 
         # Track metrics (keep raw values for epoch averages)
-        total_loss += metrics['loss']
+        total_loss += loss.item()
         total_accuracy += metrics['accuracy']
         total_pos_sim += metrics['avg_positive_sim']
         total_neg_sim += metrics['avg_negative_sim']
+        total_color_entropy += entropy_metrics['color_entropy']
         num_batches += 1
 
         # Accumulate metrics for the current step
-        step_loss += metrics['loss']
+        step_loss += loss.item()
         step_accuracy += metrics['accuracy']
         step_pos_sim += metrics['avg_positive_sim']
         step_neg_sim += metrics['avg_negative_sim']
@@ -514,14 +530,17 @@ def train_epoch(epoch):
     avg_accuracy = total_accuracy / num_batches
     avg_pos_sim = total_pos_sim / num_batches
     avg_neg_sim = total_neg_sim / num_batches
+    avg_color_entropy = total_color_entropy / num_batches
 
     print(f"Epoch {epoch} complete: Emitted {emission_count} batch updates out of {num_batches} total batches")
+    print(f"  Color entropy: {avg_color_entropy:.4f}")
 
     return {
         'loss': avg_loss,
         'accuracy': avg_accuracy,
         'avg_positive_sim': avg_pos_sim,
         'avg_negative_sim': avg_neg_sim,
+        'color_entropy': avg_color_entropy,
     }
 
 

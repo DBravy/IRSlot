@@ -29,10 +29,10 @@ def parse_args():
     # Model architecture
     parser.add_argument('--num_slots', type=int, default=7,
                         help='Number of slots (default: 7)')
-    parser.add_argument('--slot_dim', type=int, default=64,
-                        help='Slot dimension (default: 64)')
-    parser.add_argument('--num_iterations', type=int, default=3,
-                        help='Number of slot attention iterations (default: 3)')
+    parser.add_argument('--slot_dim', type=int, default=32,
+                        help='Slot dimension (default: 32)')
+    parser.add_argument('--num_iterations', type=int, default=5,
+                        help='Number of slot attention iterations (default: 5)')
     parser.add_argument('--encoder_feature_dim', type=int, default=64,
                         help='Encoder feature dimension (default: 64)')
     parser.add_argument('--encoder_hidden_dim', type=int, default=128,
@@ -41,8 +41,8 @@ def parse_args():
                         help='Final embedding dimension (default: 128)')
 
     # Instance recognition
-    parser.add_argument('--momentum', type=float, default=0.5,
-                        help='Memory bank momentum (default: 0.5)')
+    parser.add_argument('--momentum', type=float, default=0.99,
+                        help='Memory bank momentum (default: 0.99)')
     parser.add_argument('--temperature', type=float, default=0.07,
                         help='InfoNCE temperature (default: 0.07)')
     parser.add_argument('--num_negatives', type=int, default=2048,
