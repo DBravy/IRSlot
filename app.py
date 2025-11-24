@@ -24,7 +24,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO
 from torch.utils.data import DataLoader
 
-from model import SlotInstanceModel
+from model import SlotInstanceModel, HierarchicalSlotModel
 from memory_bank import MemoryBank
 from loss import InfoNCELoss, ColorEntropyLoss
 from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
@@ -100,9 +100,29 @@ def _sanitize_metric(value, default=0.0):
     return v
 
 
+# ARC color palette (0-9) - global for use by multiple visualization functions
+ARC_COLORS = [
+    '#000000',  # 0: black
+    '#0074D9',  # 1: blue
+    '#FF4136',  # 2: red
+    '#2ECC40',  # 3: green
+    '#FFDC00',  # 4: yellow
+    '#AAAAAA',  # 5: gray
+    '#F012BE',  # 6: magenta
+    '#FF851B',  # 7: orange
+    '#7FDBFF',  # 8: sky blue
+    '#870C25',  # 9: dark red
+]
+
+ARC_COLOR_NAMES = [
+    'Black', 'Blue', 'Red', 'Green', 'Yellow',
+    'Gray', 'Magenta', 'Orange', 'Sky Blue', 'Dark Red'
+]
+
+
 def generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3):
     """
-    Generate attention mask visualizations for a batch of grids.
+    Generate attention mask visualizations for a batch of grids (standard model).
 
     Args:
         grids: [B, H, W] - Input grids (padded)
@@ -113,20 +133,6 @@ def generate_attention_visualizations(grids, attn_weights, original_shapes, num_
     Returns:
         List of base64-encoded PNG images
     """
-    # ARC color palette (0-9)
-    ARC_COLORS = [
-        '#000000',  # 0: black
-        '#0074D9',  # 1: blue
-        '#FF4136',  # 2: red
-        '#2ECC40',  # 3: green
-        '#FFDC00',  # 4: yellow
-        '#AAAAAA',  # 5: gray
-        '#F012BE',  # 6: magenta
-        '#FF851B',  # 7: orange
-        '#7FDBFF',  # 8: sky blue
-        '#870C25',  # 9: dark red
-    ]
-
     visualizations = []
     B, num_slots, H, W = attn_weights.shape
 
@@ -211,6 +217,135 @@ def generate_attention_visualizations(grids, attn_weights, original_shapes, num_
     return visualizations
 
 
+def generate_hierarchical_visualizations(grids, attn_weights, original_shapes, num_samples=3):
+    """
+    Generate visualizations for HierarchicalSlotModel showing both layers:
+    - Layer 1: Color segmentation masks (hard-coded - which pixels belong to each color)
+    - Layer 2: Slot-to-color attention (which colors each slot attends to)
+
+    Args:
+        grids: [B, H, W] - Input grids (padded)
+        attn_weights: [B, num_slots, num_colors] - Slot attention over colors (3D!)
+        original_shapes: List of (H, W) tuples for original (non-padded) sizes
+        num_samples: Number of samples to visualize from batch
+
+    Returns:
+        List of base64-encoded PNG images
+    """
+    visualizations = []
+    B, num_slots, num_colors = attn_weights.shape
+
+    # Convert to numpy and move to CPU
+    grids_np = grids.detach().cpu().numpy()
+    attn_np = attn_weights.detach().cpu().numpy()
+
+    # Take only num_samples from the batch
+    num_samples = min(num_samples, B)
+
+    for batch_idx in range(num_samples):
+        grid = grids_np[batch_idx]  # [H_padded, W_padded]
+        slot_color_attn = attn_np[batch_idx]  # [num_slots, num_colors]
+
+        # Get original (non-padded) dimensions
+        orig_H, orig_W = original_shapes[batch_idx]
+
+        # Crop to original size (remove padding)
+        grid = grid[:orig_H, :orig_W]
+        H, W = orig_H, orig_W
+
+        # Find which colors are actually present in this grid
+        present_colors = np.unique(grid).astype(int)
+
+        # Create figure with 2 rows:
+        # Row 1: Original grid + color masks for present colors
+        # Row 2: Slot-to-color attention heatmap
+        num_present = len(present_colors)
+        fig = plt.figure(figsize=(max(12, 2 * (num_present + 1)), 6))
+
+        # Create grid spec for two rows
+        gs = fig.add_gridspec(2, max(num_slots, num_present + 1), hspace=0.4)
+
+        # ============= ROW 1: Color Segmentation (Layer 1) =============
+        # Plot original grid
+        ax_grid = fig.add_subplot(gs[0, 0])
+        grid_img = np.zeros((H, W, 3))
+        for i in range(H):
+            for j in range(W):
+                color_idx = int(grid[i, j])
+                color_hex = ARC_COLORS[color_idx]
+                r = int(color_hex[1:3], 16) / 255.0
+                g = int(color_hex[3:5], 16) / 255.0
+                b = int(color_hex[5:7], 16) / 255.0
+                grid_img[i, j] = [r, g, b]
+
+        ax_grid.imshow(grid_img, interpolation='nearest')
+        ax_grid.set_title('Input Grid', fontsize=9, color='white')
+        ax_grid.axis('off')
+
+        # Plot color masks for present colors only
+        for idx, color_id in enumerate(present_colors):
+            ax_mask = fig.add_subplot(gs[0, idx + 1])
+            mask = (grid == color_id).astype(float)
+
+            # Create colored mask
+            color_hex = ARC_COLORS[color_id]
+            r = int(color_hex[1:3], 16) / 255.0
+            g = int(color_hex[3:5], 16) / 255.0
+            b = int(color_hex[5:7], 16) / 255.0
+
+            colored_mask = np.zeros((H, W, 3))
+            colored_mask[mask == 1] = [r, g, b]
+
+            ax_mask.imshow(colored_mask, interpolation='nearest')
+            ax_mask.set_title(f'{ARC_COLOR_NAMES[color_id]}', fontsize=8, color='white')
+            ax_mask.axis('off')
+
+        # ============= ROW 2: Slot-to-Color Attention (Layer 2) =============
+        # Create a heatmap showing which colors each slot attends to
+        ax_heatmap = fig.add_subplot(gs[1, :])
+
+        # Only show attention for colors that are present in the grid
+        attn_present = slot_color_attn[:, present_colors]  # [num_slots, num_present]
+
+        # Create heatmap
+        im = ax_heatmap.imshow(attn_present, cmap='YlOrRd', aspect='auto', vmin=0, vmax=attn_present.max())
+
+        # Labels
+        ax_heatmap.set_yticks(range(num_slots))
+        ax_heatmap.set_yticklabels([f'Slot {i}' for i in range(num_slots)], fontsize=8, color='white')
+        ax_heatmap.set_xticks(range(len(present_colors)))
+        ax_heatmap.set_xticklabels([ARC_COLOR_NAMES[c] for c in present_colors], fontsize=8, color='white', rotation=45, ha='right')
+        ax_heatmap.set_title('Layer 2: Slot → Color Attention', fontsize=10, color='white')
+        ax_heatmap.tick_params(colors='white')
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax_heatmap, fraction=0.02, pad=0.02)
+        cbar.ax.tick_params(colors='white', labelsize=7)
+
+        # Add attention values as text annotations
+        for i in range(num_slots):
+            for j in range(len(present_colors)):
+                val = attn_present[i, j]
+                text_color = 'white' if val > attn_present.max() * 0.5 else 'black'
+                ax_heatmap.text(j, i, f'{val:.2f}', ha='center', va='center',
+                               fontsize=7, color=text_color)
+
+        # Set dark background
+        fig.patch.set_facecolor('#1a1a2e')
+
+        # Convert to base64
+        buf = BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format='png', facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight', dpi=100)
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close(fig)
+
+        visualizations.append(img_base64)
+
+    return visualizations
+
+
 def initialize_training(config):
     """Initialize all training components from config."""
     print("Initializing training components...")
@@ -262,16 +397,31 @@ def initialize_training(config):
 
     # Create model
     print("Creating model...")
-    model = SlotInstanceModel(
-        num_colors=10,
-        encoder_feature_dim=config['encoder_feature_dim'],
-        encoder_hidden_dim=config['encoder_hidden_dim'],
-        num_slots=config['num_slots'],
-        slot_dim=config['slot_dim'],
-        num_iterations=config['num_iterations'],
-        embedding_dim=config['embedding_dim'],
-        max_grid_size=30
-    ).to(device)
+    model_type = config.get('model_type', 'standard')
+    if model_type == 'hierarchical':
+        print(f"  Using HierarchicalSlotModel (hard-coded color segmentation)")
+        model = HierarchicalSlotModel(
+            num_colors=10,
+            encoder_feature_dim=config['encoder_feature_dim'],
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            num_slots=config['num_slots'],
+            slot_dim=config['slot_dim'],
+            num_iterations=config['num_iterations'],
+            embedding_dim=config['embedding_dim'],
+            max_grid_size=30
+        ).to(device)
+    else:
+        print(f"  Using SlotInstanceModel (standard)")
+        model = SlotInstanceModel(
+            num_colors=10,
+            encoder_feature_dim=config['encoder_feature_dim'],
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            num_slots=config['num_slots'],
+            slot_dim=config['slot_dim'],
+            num_iterations=config['num_iterations'],
+            embedding_dim=config['embedding_dim'],
+            max_grid_size=30
+        ).to(device)
 
     # Create memory bank
     print("Creating memory bank...")
@@ -385,8 +535,20 @@ def train_epoch(epoch):
         grid_ids = batch['grid_ids'].to(device)
         grids = batch['grids'].to(device)
 
-        # Forward pass (with attention weights for color entropy)
-        embeddings, slots, attn_weights = model(grids, return_attn=True)
+        # Check model type for appropriate loss computation
+        model_type = config.get('model_type', 'standard')
+
+        # Forward pass
+        if model_type == 'hierarchical':
+            # Hierarchical model: color entropy loss not applicable (color segmentation is hard-coded)
+            embeddings, slots = model(grids, return_attn=False)
+            entropy_loss = torch.tensor(0.0, device=device)
+            entropy_metrics = {'color_entropy': 0.0}
+        else:
+            # Standard model: use attention weights for color entropy
+            embeddings, slots, attn_weights = model(grids, return_attn=True)
+            entropy_loss, entropy_metrics = color_entropy_criterion(attn_weights, grids)
+
         stored_embeddings = memory_bank.get(grid_ids)
         negative_embeddings = memory_bank.sample_negatives(
             num_negatives=config['num_negatives'],
@@ -396,10 +558,7 @@ def train_epoch(epoch):
         # Compute contrastive loss
         contrastive_loss, metrics = criterion(embeddings, stored_embeddings, negative_embeddings)
 
-        # Compute color entropy loss
-        entropy_loss, entropy_metrics = color_entropy_criterion(attn_weights, grids)
-
-        # Combined loss
+        # Combined loss (entropy loss is 0 for hierarchical model)
         loss = contrastive_loss + color_entropy_weight * entropy_loss
 
         # Backward pass
@@ -503,8 +662,13 @@ def train_epoch(epoch):
                     # Get original shapes from batch
                     original_shapes = batch.get('original_shapes', [(grids.shape[1], grids.shape[2])] * grids.shape[0])
 
-                    # Generate visualizations (3 samples from batch)
-                    vis_images = generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3)
+                    # Use appropriate visualization function based on model type
+                    if model_type == 'hierarchical':
+                        # Hierarchical model: attn_weights is [B, num_slots, num_colors] (3D)
+                        vis_images = generate_hierarchical_visualizations(grids, attn_weights, original_shapes, num_samples=3)
+                    else:
+                        # Standard model: attn_weights is [B, num_slots, H, W] (4D)
+                        vis_images = generate_attention_visualizations(grids, attn_weights, original_shapes, num_samples=3)
 
                     # Calculate current step for visualization
                     viz_step = ((batch_idx + 1) // batch_log_interval) + (epoch - 1) * ((len(dataloader) + batch_log_interval - 1) // batch_log_interval)

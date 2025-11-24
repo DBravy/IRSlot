@@ -132,6 +132,104 @@ class SlotAttention(nn.Module):
         return slots
 
 
+class SlotAttentionNoPos(nn.Module):
+    """
+    Slot Attention without spatial positional encoding.
+
+    Used for non-spatial inputs like color-pooled features where the input
+    is a set of feature vectors without spatial arrangement.
+    """
+    def __init__(self, num_slots, slot_dim, feature_dim, num_iterations=3, hidden_dim=128, eps=1e-8):
+        super().__init__()
+        self.num_slots = num_slots
+        self.slot_dim = slot_dim
+        self.feature_dim = feature_dim
+        self.num_iterations = num_iterations
+        self.eps = eps
+
+        # Learned slot initialization parameters
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, slot_dim))
+        self.slots_log_sigma = nn.Parameter(torch.zeros(1, 1, slot_dim))
+
+        # Layer norm for slots and inputs
+        self.norm_slots = nn.LayerNorm(slot_dim)
+        self.norm_inputs = nn.LayerNorm(feature_dim)
+
+        # Linear maps for attention (Q, K, V)
+        self.project_q = nn.Linear(slot_dim, slot_dim, bias=False)
+        self.project_k = nn.Linear(feature_dim, slot_dim, bias=False)
+        self.project_v = nn.Linear(feature_dim, slot_dim, bias=False)
+
+        # Slot update functions
+        self.gru = nn.GRUCell(slot_dim, slot_dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(slot_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, slot_dim)
+        )
+
+    def forward(self, inputs, return_attn=False):
+        """
+        Args:
+            inputs: [B, num_features, feature_dim] - Non-spatial feature vectors
+            return_attn: If True, return attention weights from final iteration
+
+        Returns:
+            slots: [B, num_slots, slot_dim]
+            attn: [B, num_slots, num_features] - Only returned if return_attn=True
+        """
+        B, N, D = inputs.shape
+
+        # Initialize slots from learned distribution
+        mu = self.slots_mu.expand(B, self.num_slots, -1)
+        sigma = self.slots_log_sigma.exp().expand(B, self.num_slots, -1)
+        slots = mu + sigma * torch.randn_like(mu)
+
+        # Normalize inputs (no positional encoding for non-spatial inputs)
+        inputs = self.norm_inputs(inputs)
+        k = self.project_k(inputs)  # [B, N, slot_dim]
+        v = self.project_v(inputs)  # [B, N, slot_dim]
+
+        # Iterative attention
+        attn_weights = None
+        for iteration in range(self.num_iterations):
+            slots_prev = slots
+            slots = self.norm_slots(slots)
+
+            # Attention
+            q = self.project_q(slots)  # [B, num_slots, slot_dim]
+
+            # Compute attention weights
+            attn_logits = torch.bmm(q, k.transpose(-1, -2)) / (self.slot_dim ** 0.5)
+            attn = F.softmax(attn_logits, dim=1)  # Softmax over slots
+
+            # Weighted normalization across slots
+            attn = attn + self.eps
+            attn = attn / attn.sum(dim=1, keepdim=True)
+
+            # Store attention from final iteration if requested
+            if return_attn and iteration == self.num_iterations - 1:
+                attn_weights = attn
+
+            # Weighted mean
+            updates = torch.bmm(attn, v)
+
+            # Update slots with GRU
+            slots = self.gru(
+                updates.reshape(B * self.num_slots, self.slot_dim),
+                slots_prev.reshape(B * self.num_slots, self.slot_dim)
+            )
+            slots = slots.reshape(B, self.num_slots, self.slot_dim)
+
+            # Apply MLP
+            slots = slots + self.mlp(slots)
+
+        if return_attn:
+            return slots, attn_weights
+        return slots
+
+
 class SlotDecoder(nn.Module):
     """
     Decoder for slot attention that reconstructs the grid from slots.

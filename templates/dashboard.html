@@ -334,6 +334,14 @@
                     </select>
                 </div>
 
+                <div style="grid-column: 1 / -1;">
+                    <label class="form-label">Model Type</label>
+                    <select id="model_type" class="form-input">
+                        <option value="standard">Standard (learned slot attention on pixels)</option>
+                        <option value="hierarchical" selected>Hierarchical (hard-coded color segmentation)</option>
+                    </select>
+                </div>
+
                 <div>
                     <label class="form-label">Number of Epochs</label>
                     <input type="number" id="num_epochs" class="form-input" value="100">
@@ -735,6 +743,7 @@
         function getConfigFromForm() {
             const config = {
                 data_dir: document.getElementById('data_dir').value,
+                model_type: document.getElementById('model_type').value,
                 num_epochs: parseInt(document.getElementById('num_epochs').value),
                 batch_size: parseInt(document.getElementById('batch_size').value),
                 lr: parseFloat(document.getElementById('lr').value),
