@@ -31,6 +31,7 @@ class SlotAttentionEncoder(nn.Module):
     Args:
         num_slots: Number of object slots to extract
         slot_dim: Dimension of slot features from CNN
+        feature_dim: Dimension of input features (can differ from slot_dim)
         hidden_size: Dimension of transformer hidden states
         num_iterations: Number of slot attention refinement iterations
         mlp_hidden_size: Hidden size for slot update MLP
@@ -42,6 +43,7 @@ class SlotAttentionEncoder(nn.Module):
         self,
         num_slots: int,
         slot_dim: int,
+        feature_dim: int,
         hidden_size: int,
         num_iterations: int = 3,
         mlp_hidden_size: int = 128,
@@ -51,6 +53,7 @@ class SlotAttentionEncoder(nn.Module):
         super().__init__()
         self.num_slots = num_slots
         self.slot_dim = slot_dim
+        self.feature_dim = feature_dim
         self.hidden_size = hidden_size
         self.num_iterations = num_iterations
         self.max_spatial_size = max_spatial_size
@@ -60,7 +63,7 @@ class SlotAttentionEncoder(nn.Module):
         # Learned 2D spatial positional encodings
         # These provide spatial awareness to the slot attention mechanism
         self.spatial_pos_encoding = nn.Parameter(
-            torch.randn(1, max_spatial_size, max_spatial_size, slot_dim) * 0.02
+            torch.randn(1, max_spatial_size, max_spatial_size, feature_dim) * 0.02
         )
 
         # Learned slot initialization parameters
@@ -70,12 +73,12 @@ class SlotAttentionEncoder(nn.Module):
 
         # Layer normalization
         self.norm_slots = nn.LayerNorm(slot_dim)
-        self.norm_inputs = nn.LayerNorm(slot_dim)
+        self.norm_inputs = nn.LayerNorm(feature_dim)
 
         # Attention projections (Queries, Keys, Values)
         self.project_q = nn.Linear(slot_dim, slot_dim, bias=False)
-        self.project_k = nn.Linear(slot_dim, slot_dim, bias=False)
-        self.project_v = nn.Linear(slot_dim, slot_dim, bias=False)
+        self.project_k = nn.Linear(feature_dim, slot_dim, bias=False)
+        self.project_v = nn.Linear(feature_dim, slot_dim, bias=False)
 
         # Slot update mechanism using GRU
         self.gru = nn.GRUCell(slot_dim, slot_dim)
@@ -128,7 +131,7 @@ class SlotAttentionEncoder(nn.Module):
         Apply slot attention to extract object-centric representations.
 
         Args:
-            features: CNN features [batch, num_positions, slot_dim]
+            features: CNN features [batch, num_positions, feature_dim]
             spatial_size: Optional (H, W) tuple specifying spatial dimensions.
                          If None, inferred from num_positions (assumes square grid).
             return_attn: If True, return attention weights from final iteration
@@ -138,7 +141,7 @@ class SlotAttentionEncoder(nn.Module):
             attn_weights: (Optional) Attention weights [batch, num_slots, num_positions]
         """
         B, N, D = features.shape
-        assert D == self.slot_dim, f"Expected slot_dim={self.slot_dim}, got {D}"
+        assert D == self.feature_dim, f"Expected feature_dim={self.feature_dim}, got {D}"
 
         # Infer or validate spatial dimensions
         if spatial_size is not None:
@@ -152,7 +155,7 @@ class SlotAttentionEncoder(nn.Module):
 
         # Add learned spatial positional encodings
         # Extract relevant portion for actual spatial size
-        pos_enc = self.spatial_pos_encoding[:, :H, :W, :]  # [1, H, W, slot_dim]
+        pos_enc = self.spatial_pos_encoding[:, :H, :W, :]  # [1, H, W, feature_dim]
         features_spatial = features_spatial + pos_enc.to(self.forward_dtype)
 
         # Reshape back to [B, N, D]
@@ -216,7 +219,7 @@ class SlotAttentionEncoder(nn.Module):
         Utility method to visualize which spatial positions each slot attends to.
 
         Args:
-            features: CNN features [batch, num_positions, slot_dim]
+            features: CNN features [batch, num_positions, feature_dim]
             spatial_size: Optional (H, W) tuple
 
         Returns:

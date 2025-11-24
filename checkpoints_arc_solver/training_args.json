@@ -3,13 +3,14 @@
   "arc_version": "agi1",
   "max_train_examples": 5,
   "subset_size": null,
+  "augmentations_per_puzzle": 2,
   "hidden_size": 256,
   "num_layers": 4,
   "num_heads": 8,
   "num_slots": 7,
   "slot_dim": 64,
   "slot_iterations": 3,
-  "batch_size": 8,
+  "batch_size": 4,
   "num_epochs": 100,
   "lr": 0.0001,
   "weight_decay": 0.01,
@@ -19,5 +20,10 @@
   "resume": null,
   "device": "cpu",
   "log_every": 10,
-  "eval_every": 5
+  "eval_every": 5,
+  "use_contrastive": false,
+  "contrastive_weight": 1.0,
+  "contrastive_temperature": 0.07,
+  "contrastive_num_negatives": 512,
+  "memory_bank_momentum": 0.5
 }

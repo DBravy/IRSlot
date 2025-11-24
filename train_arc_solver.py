@@ -16,7 +16,8 @@ from tqdm import tqdm
 import time
 
 from models.arc_solver import ARCSlotSolver, ARCSlotSolverConfig
-from dataset.arc_puzzle_dataset import ARCPuzzleDataset, collate_puzzle_batch, create_collate_fn
+from dataset.arc_puzzle_dataset import ARCPuzzleDataset, collate_puzzle_batch
+from dataset.grid_dataset import GridDataset, collate_grid_batch
 from memory_bank import MemoryBank
 
 
@@ -33,6 +34,8 @@ def parse_args():
                         help='Maximum number of train examples per puzzle')
     parser.add_argument('--subset_size', type=int, default=None,
                         help='Limit dataset size (for debugging)')
+    parser.add_argument('--augmentations_per_puzzle', type=int, default=2,
+                        help='Number of augmented views per puzzle when contrastive loss is enabled')
 
     # Model architecture
     parser.add_argument('--hidden_size', type=int, default=256,
@@ -92,6 +95,10 @@ def parse_args():
     parser.add_argument('--memory_bank_momentum', type=float, default=0.5,
                         help='Momentum for memory bank updates')
 
+    # Interleaved training (instance recognition vs ARC solving)
+    parser.add_argument('--instance_to_arc_ratio', type=int, default=10,
+                        help='Number of instance recognition batches per 1 ARC solver batch')
+
     return parser.parse_args()
 
 
@@ -128,13 +135,16 @@ def create_model(args):
 
 def create_datasets(args):
     """Create train and validation datasets."""
-    # Training set
+    # ARC Puzzle Dataset (for puzzle solving task)
+    # No augmentation here - augmentation is handled in GridDataset for contrastive learning
     train_dataset = ARCPuzzleDataset(
         data_dir=args.data_dir,
         split='train',
         arc_version=args.arc_version,
         max_train_examples=args.max_train_examples,
         subset_size=args.subset_size,
+        augment=False,  # No augmentation for ARC solving
+        augmentations_per_puzzle=1,
     )
 
     # Validation set (use eval split)
@@ -144,13 +154,33 @@ def create_datasets(args):
         arc_version=args.arc_version,
         max_train_examples=args.max_train_examples,
         subset_size=args.subset_size // 4 if args.subset_size else None,
+        augment=False,
     )
 
-    return train_dataset, val_dataset
+    # Grid Dataset (for instance recognition / contrastive learning)
+    grid_train_dataset = None
+    if args.use_contrastive:
+        grid_train_dataset = GridDataset(
+            data_dir=args.data_dir,
+            split='train',
+            arc_version=args.arc_version,
+            augment=True,  # Apply augmentation for contrastive learning
+            subset_size=args.subset_size,
+        )
+
+    return train_dataset, val_dataset, grid_train_dataset
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args, memory_bank=None):
-    """Train for one epoch."""
+def train_epoch(model, arc_dataloader, grid_dataloader, optimizer, scheduler, device, epoch, args, memory_bank=None):
+    """
+    Train for one epoch with interleaved instance recognition and ARC solving.
+
+    If use_contrastive is enabled, alternates between:
+    - N instance recognition batches (contrastive loss on individual grids)
+    - 1 ARC solver batch (puzzle solving loss)
+
+    Otherwise, just trains on ARC solving batches.
+    """
     model.train()
 
     total_loss = 0
@@ -158,17 +188,89 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args, me
     total_contrastive_loss = 0
     total_accuracy = 0
     total_contrastive_accuracy = 0
-    num_batches = 0
+    total_pos_sim = 0
+    total_neg_sim = 0
+    num_arc_batches = 0
+    num_instance_batches = 0
 
-    pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs}')
+    # Create iterators
+    arc_iter = iter(arc_dataloader)
+    grid_iter = iter(grid_dataloader) if grid_dataloader is not None else None
 
-    for batch_idx, batch in enumerate(pbar):
+    # Calculate total steps for progress bar
+    total_steps = len(arc_dataloader)
+    if args.use_contrastive and grid_dataloader is not None:
+        # Each ARC batch is preceded by N instance recognition batches
+        total_steps = len(arc_dataloader) * (1 + args.instance_to_arc_ratio)
+
+    pbar = tqdm(total=total_steps, desc=f'Epoch {epoch+1}/{args.num_epochs}')
+
+    arc_exhausted = False
+
+    while not arc_exhausted:
+        # ============================================
+        # Phase 1: Instance Recognition (Contrastive)
+        # ============================================
+        if args.use_contrastive and grid_iter is not None:
+            for _ in range(args.instance_to_arc_ratio):
+                try:
+                    grid_batch = next(grid_iter)
+                except StopIteration:
+                    # Grid dataset exhausted, restart iterator
+                    grid_iter = iter(grid_dataloader)
+                    grid_batch = next(grid_iter)
+
+                # Move batch to device
+                grid_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                             for k, v in grid_batch.items()}
+
+                # Compute contrastive loss on individual grids
+                loss_dict = model.compute_contrastive_loss_on_grids(grid_batch, memory_bank)
+                loss = loss_dict['loss']
+
+                # Backward pass
+                optimizer.zero_grad()
+                loss.backward()
+
+                # Gradient clipping
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                optimizer.step()
+                scheduler.step()
+
+                # Accumulate metrics
+                total_contrastive_loss += loss.item()
+                total_contrastive_accuracy += loss_dict['accuracy'].item()
+                total_pos_sim += loss_dict['avg_positive_sim'].item()
+                total_neg_sim += loss_dict['avg_negative_sim'].item()
+                num_instance_batches += 1
+
+                # Update progress bar
+                pbar.update(1)
+                pbar.set_postfix({
+                    'mode': 'instance',
+                    'cont_loss': f'{loss.item():.4f}',
+                    'cont_acc': f'{loss_dict["accuracy"].item():.3f}',
+                    'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+                })
+
+        # ============================================
+        # Phase 2: ARC Puzzle Solving
+        # ============================================
+        try:
+            arc_batch = next(arc_iter)
+        except StopIteration:
+            # ARC dataset exhausted, end epoch
+            arc_exhausted = True
+            break
+
         # Move batch to device
-        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                 for k, v in batch.items()}
+        arc_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in arc_batch.items()}
 
-        # Forward pass with optional memory bank
-        loss_dict = model.compute_loss(batch, memory_bank=memory_bank)
+        # Forward pass (ARC solving only, no contrastive)
+        loss_dict = model.compute_loss(arc_batch, memory_bank=None)
         loss = loss_dict['loss']
         accuracy = loss_dict['pixel_accuracy']
 
@@ -186,29 +288,35 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args, me
         # Accumulate metrics
         total_loss += loss.item()
         total_arc_loss += loss_dict['arc_loss'].item()
-        total_contrastive_loss += loss_dict['contrastive_loss'].item()
         total_accuracy += accuracy.item()
-        total_contrastive_accuracy += loss_dict['contrastive_accuracy'].item()
-        num_batches += 1
+        num_arc_batches += 1
 
         # Update progress bar
-        if batch_idx % args.log_every == 0:
-            postfix = {
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{accuracy.item():.4f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
-            }
-            if args.use_contrastive:
-                postfix['arc_loss'] = f'{loss_dict["arc_loss"].item():.4f}'
-                postfix['cont_loss'] = f'{loss_dict["contrastive_loss"].item():.4f}'
-                postfix['cont_acc'] = f'{loss_dict["contrastive_accuracy"].item():.3f}'
-            pbar.set_postfix(postfix)
+        pbar.update(1)
+        pbar.set_postfix({
+            'mode': 'ARC',
+            'arc_loss': f'{loss.item():.4f}',
+            'acc': f'{accuracy.item():.4f}',
+            'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+        })
 
-    avg_loss = total_loss / num_batches
-    avg_arc_loss = total_arc_loss / num_batches
-    avg_contrastive_loss = total_contrastive_loss / num_batches
-    avg_accuracy = total_accuracy / num_batches
-    avg_contrastive_accuracy = total_contrastive_accuracy / num_batches
+    pbar.close()
+
+    # Compute averages
+    avg_arc_loss = total_arc_loss / num_arc_batches if num_arc_batches > 0 else 0.0
+    avg_accuracy = total_accuracy / num_arc_batches if num_arc_batches > 0 else 0.0
+    avg_contrastive_loss = total_contrastive_loss / num_instance_batches if num_instance_batches > 0 else 0.0
+    avg_contrastive_accuracy = total_contrastive_accuracy / num_instance_batches if num_instance_batches > 0 else 0.0
+    avg_pos_sim = total_pos_sim / num_instance_batches if num_instance_batches > 0 else 0.0
+    avg_neg_sim = total_neg_sim / num_instance_batches if num_instance_batches > 0 else 0.0
+
+    # Total loss is weighted average
+    if num_arc_batches > 0 and num_instance_batches > 0:
+        avg_loss = (total_arc_loss + args.contrastive_weight * total_contrastive_loss) / (num_arc_batches + num_instance_batches)
+    elif num_arc_batches > 0:
+        avg_loss = avg_arc_loss
+    else:
+        avg_loss = avg_contrastive_loss
 
     return {
         'loss': avg_loss,
@@ -216,6 +324,8 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, args, me
         'contrastive_loss': avg_contrastive_loss,
         'accuracy': avg_accuracy,
         'contrastive_accuracy': avg_contrastive_accuracy,
+        'avg_positive_sim': avg_pos_sim,
+        'avg_negative_sim': avg_neg_sim,
     }
 
 
@@ -429,22 +539,15 @@ def main():
 
     # Create datasets
     print("\nCreating datasets...")
-    train_dataset, val_dataset = create_datasets(args)
+    train_dataset, val_dataset, grid_train_dataset = create_datasets(args)
 
-    # Create appropriate collate function
-    # Use custom collate with puzzle_id mapping for multi-task learning
-    if args.use_contrastive:
-        train_collate_fn = create_collate_fn(train_dataset.puzzle_id_to_idx)
-        val_collate_fn = create_collate_fn(val_dataset.puzzle_id_to_idx)
-    else:
-        train_collate_fn = collate_puzzle_batch
-        val_collate_fn = collate_puzzle_batch
-
-    train_loader = DataLoader(
+    # Create dataloaders
+    # ARC puzzle dataloader (always use simple collate, no puzzle_id mapping needed)
+    arc_train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=train_collate_fn,
+        collate_fn=collate_puzzle_batch,
         num_workers=0,  # Set to 0 for debugging, increase for speed
     )
 
@@ -452,11 +555,26 @@ def main():
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=val_collate_fn,
+        collate_fn=collate_puzzle_batch,
         num_workers=0,
     )
 
-    print(f"Train batches: {len(train_loader)}")
+    # Grid dataloader for instance recognition (if contrastive learning enabled)
+    grid_train_loader = None
+    if args.use_contrastive and grid_train_dataset is not None:
+        grid_train_loader = DataLoader(
+            grid_train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            collate_fn=collate_grid_batch,
+            num_workers=0,
+        )
+        print(f"ARC Train batches: {len(arc_train_loader)}")
+        print(f"Grid Train batches: {len(grid_train_loader)}")
+        print(f"Instance-to-ARC ratio: {args.instance_to_arc_ratio}:1")
+    else:
+        print(f"Train batches: {len(arc_train_loader)}")
+
     print(f"Val batches: {len(val_loader)}")
 
     # Create model
@@ -473,12 +591,15 @@ def main():
     memory_bank = None
     if args.use_contrastive:
         print("\nEnabling multi-task learning with contrastive loss...")
-        # Get number of unique puzzles for memory bank sizing
-        num_unique_puzzles = train_dataset.num_unique_puzzles()
-        print(f"Creating memory bank for {num_unique_puzzles} unique puzzles...")
-        print(f"  (Dataset has {len(train_dataset)} effective examples with augmentations)")
+        # Get number of unique GRIDS for memory bank sizing
+        # GridDataset assigns a unique index to each individual grid
+        num_unique_grids = grid_train_dataset.num_unique_grids()
+        num_unique_puzzles = grid_train_dataset.num_unique_puzzles()
+        print(f"Creating memory bank for {num_unique_grids} unique grids from {num_unique_puzzles} puzzles...")
+        print(f"  (Each grid gets its own embedding in the memory bank)")
+        print(f"  (ARCPuzzleDataset has {len(train_dataset)} puzzle examples)")
         memory_bank = MemoryBank(
-            num_grids=num_unique_puzzles,
+            num_grids=num_unique_grids,
             embedding_dim=128,  # contrastive_embedding_dim
             momentum=args.memory_bank_momentum
         ).to(device)
@@ -493,7 +614,12 @@ def main():
         weight_decay=args.weight_decay
     )
 
-    total_steps = len(train_loader) * args.num_epochs
+    # Calculate total steps (including instance recognition batches if enabled)
+    if args.use_contrastive and grid_train_loader is not None:
+        steps_per_epoch = len(arc_train_loader) * (1 + args.instance_to_arc_ratio)
+    else:
+        steps_per_epoch = len(arc_train_loader)
+    total_steps = steps_per_epoch * args.num_epochs
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
 
     # Resume from checkpoint if specified
@@ -522,7 +648,7 @@ def main():
 
         # Train
         train_metrics = train_epoch(
-            model, train_loader, optimizer, scheduler, device, epoch, args, memory_bank
+            model, arc_train_loader, grid_train_loader, optimizer, scheduler, device, epoch, args, memory_bank
         )
 
         # Validate

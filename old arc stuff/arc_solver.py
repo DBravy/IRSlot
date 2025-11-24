@@ -16,7 +16,13 @@ from typing import Dict, Tuple, Optional, List
 from collections import Counter
 from pydantic import BaseModel
 
-from models.trm import CNNEncoder, SpatialBroadcastDecoder
+from models.trm import (
+    CNNEncoder, 
+    SpatialBroadcastDecoder,
+    TinyRecursiveReasoningModel_ACTV1,
+    TinyRecursiveReasoningModel_ACTV1Config,
+    TinyRecursiveReasoningModel_ACTV1Carry
+)
 from models.slot_encoder import SlotAttentionEncoder
 from models.arc_slot_builder import ARCSlotSequenceBuilder
 from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin
@@ -37,15 +43,25 @@ class ARCSlotSolverConfig(BaseModel):
     slot_iterations: int = 3
     slot_mlp_hidden: int = 128
 
-    # Transformer
+    # TRM Recursive Reasoning (replaces simple transformer)
     hidden_size: int = 256
-    num_layers: int = 4
     num_heads: int = 8
     expansion: float = 4.0
+    H_cycles: int = 2  # High-level reasoning cycles
+    L_cycles: int = 2  # Low-level reasoning cycles
+    L_layers: int = 4  # Number of transformer layers in L-level
+    mlp_t: bool = False  # Use MLP instead of transformer in L-level
+    
+    # ACT (Adaptive Computation Time) for dynamic halting
+    halt_max_steps: int = 1  # Set to 1 to disable ACT, >1 to enable
+    halt_exploration_prob: float = 0.1
+    no_ACT_continue: bool = True  # Use sigmoid halt instead of Q-learning
 
     # Puzzle handling
     max_train_examples: int = 10
     max_grid_size: int = 30
+    puzzle_emb_ndim: int = 0  # Puzzle embeddings disabled by default
+    num_puzzle_identifiers: int = 1000  # Max number of unique puzzles
 
     # Decoder
     decoder_hidden_dim: int = 64
@@ -56,7 +72,7 @@ class ARCSlotSolverConfig(BaseModel):
     rms_norm_eps: float = 1e-5
 
     # Position encodings
-    use_rope: bool = True
+    pos_encodings: str = "rope"  # "rope", "learned", or "none"
     rope_theta: float = 10000.0
 
     # Contrastive learning (multi-task)
@@ -67,52 +83,6 @@ class ARCSlotSolverConfig(BaseModel):
     contrastive_loss_weight: float = 1.0
 
 
-class TransformerBlock(nn.Module):
-    """Single transformer block for reasoning over slots."""
-
-    def __init__(self, config: ARCSlotSolverConfig):
-        super().__init__()
-        self.config = config
-
-        self.self_attn = Attention(
-            hidden_size=config.hidden_size,
-            head_dim=config.hidden_size // config.num_heads,
-            num_heads=config.num_heads,
-            num_key_value_heads=config.num_heads,
-            causal=False  # Bidirectional attention
-        )
-
-        self.mlp = SwiGLU(
-            hidden_size=config.hidden_size,
-            expansion=config.expansion,
-        )
-
-        self.norm_eps = config.rms_norm_eps
-
-    def forward(self, hidden_states: torch.Tensor, cos_sin: Optional[CosSin] = None, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: [batch, seq_len, hidden_size]
-            cos_sin: Optional rotary embeddings
-            attention_mask: Optional [batch, seq_len] mask (currently not used by Attention layer)
-
-        Returns:
-            hidden_states: [batch, seq_len, hidden_size]
-        """
-        # Self attention with post-norm
-        # Note: attention_mask is accepted but not passed to self_attn
-        # as the Attention class doesn't support it yet
-        attn_output = self.self_attn(
-            cos_sin=cos_sin,
-            hidden_states=hidden_states
-        )
-        hidden_states = rms_norm(hidden_states + attn_output, variance_epsilon=self.norm_eps)
-
-        # MLP with post-norm
-        mlp_output = self.mlp(hidden_states)
-        hidden_states = rms_norm(hidden_states + mlp_output, variance_epsilon=self.norm_eps)
-
-        return hidden_states
 
 
 class ARCSlotSolver(nn.Module):
@@ -140,13 +110,15 @@ class ARCSlotSolver(nn.Module):
             input_channels=config.grid_channels,
             hidden_dim=config.cnn_hidden_dim,
             slot_dim=config.slot_dim,
-            forward_dtype=self.forward_dtype
+            forward_dtype=self.forward_dtype,
+            num_colors=config.output_channels  # Use output_channels (10 for ARC colors)
         )
 
         # 2. Slot Encoder: Features → Slots
         self.slot_encoder = SlotAttentionEncoder(
             num_slots=config.num_slots_per_grid,
             slot_dim=config.slot_dim,
+            feature_dim=config.slot_dim,
             hidden_size=config.hidden_size,
             num_iterations=config.slot_iterations,
             mlp_hidden_size=config.slot_mlp_hidden,
@@ -164,25 +136,40 @@ class ARCSlotSolver(nn.Module):
             puzzle_emb_dim=0,  # No puzzle embeddings for now
         )
 
-        # 4. Transformer Reasoning Layers
-        self.layers = nn.ModuleList([
-            TransformerBlock(config) for _ in range(config.num_layers)
-        ])
-
-        # Position encodings
-        if config.use_rope:
-            # Estimate max sequence length
-            max_seq_len = (
-                config.max_train_examples * 2 * (1 + config.num_slots_per_grid) +  # train examples
-                2 * (1 + config.num_slots_per_grid)  # test + predict
-            )
-            self.rotary_emb = RotaryEmbedding(
-                dim=config.hidden_size // config.num_heads,
-                max_position_embeddings=max_seq_len,
-                base=config.rope_theta
-            )
-        else:
-            self.rotary_emb = None
+        # 4. TRM Recursive Reasoning Module
+        # Estimate max sequence length for the slot sequence
+        max_seq_len = (
+            config.max_train_examples * 2 * (1 + config.num_slots_per_grid) +  # train examples
+            2 * (1 + config.num_slots_per_grid)  # test + predict
+        )
+        
+        # Create TRM config - TRM will handle the reasoning over the slot sequence
+        trm_config_dict = {
+            'batch_size': 32,  # Will be overridden dynamically
+            'seq_len': max_seq_len,
+            'puzzle_emb_ndim': config.puzzle_emb_ndim,
+            'num_puzzle_identifiers': config.num_puzzle_identifiers,
+            'vocab_size': 10,  # Not used in our case (we work with slots)
+            'H_cycles': config.H_cycles,
+            'L_cycles': config.L_cycles,
+            'H_layers': 1,  # Not used, kept for compatibility
+            'L_layers': config.L_layers,
+            'hidden_size': config.hidden_size,
+            'expansion': config.expansion,
+            'num_heads': config.num_heads,
+            'pos_encodings': config.pos_encodings,
+            'rms_norm_eps': config.rms_norm_eps,
+            'rope_theta': config.rope_theta,
+            'halt_max_steps': config.halt_max_steps,
+            'halt_exploration_prob': config.halt_exploration_prob,
+            'forward_dtype': config.forward_dtype,
+            'mlp_t': config.mlp_t,
+            'puzzle_emb_len': 0,  # Auto-calculate
+            'no_ACT_continue': config.no_ACT_continue,
+            'use_slot_attention': False,  # We handle slot encoding externally
+        }
+        
+        self.trm = TinyRecursiveReasoningModel_ACTV1(trm_config_dict)
 
         # 5. Spatial Broadcast Decoder: Slots → Grid
         self.decoder = SpatialBroadcastDecoder(
@@ -217,73 +204,118 @@ class ARCSlotSolver(nn.Module):
         self,
         puzzle_batch: Dict[str, torch.Tensor],
         return_intermediate: bool = False,
-        return_test_input_slots: bool = False
+        carry: Optional[TinyRecursiveReasoningModel_ACTV1Carry] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Solve ARC puzzles.
+        Solve ARC puzzles using TRM's recursive reasoning.
 
         Args:
             puzzle_batch: Dict from ARCPuzzleDataset collate function
             return_intermediate: If True, return intermediate representations
-            return_test_input_slots: If True, return raw slots from test input (for contrastive learning)
+            carry: Optional TRM carry state (for multi-step reasoning with ACT)
 
         Returns:
             Dict with:
                 - predicted_grids: [batch, output_channels, H, W]
                 - predicted_slots: [batch, num_slots, hidden_size]
-                - test_input_slots: [batch, num_slots, slot_dim] (only if return_test_input_slots=True)
+                - carry: TRM carry state (for ACT)
+                - q_halt_logits: Halting Q-values (if ACT enabled)
                 - (optional) intermediate states
         """
         # 1. Build slot sequence
         sequence_output = self.sequence_builder(puzzle_batch)
 
         sequence = sequence_output['sequence']  # [batch, seq_len, hidden_size]
-        attention_mask = sequence_output['attention_mask']  # [batch, seq_len]
+        attention_mask = sequence_output['attention_mask'].to(sequence.device)  # [batch, seq_len]
         predict_positions = sequence_output['predict_positions']  # [batch, 2]
 
-        # 1b. Extract test input slots for contrastive learning (if needed)
-        test_input_slots_raw = None
-        if return_test_input_slots and self.use_contrastive:
-            # Manually encode test input to get raw slots (before projection to hidden_size)
-            test_inputs = puzzle_batch['test_inputs'][:, 0]  # [batch, H, W] - first test input
-            batch_size, H, W = test_inputs.shape
-
-            # Encode with CNN
-            test_features = self.cnn_encoder(test_inputs)  # [batch, H*W, slot_dim]
-
-            # Get raw slots (before projection to hidden_size)
-            # We need to access the slot encoder's internals before projection
-            # For now, we'll use the slot encoder normally and then project back
-            # This is a workaround - ideally we'd modify SlotAttentionEncoder to return both
-            test_slots_hidden = self.slot_encoder(test_features, spatial_size=(H, W))  # [batch, num_slots, hidden_size]
-
-            # Since slots are already projected to hidden_size, we'll work with those
-            # The contrastive projection will map from hidden_size to embedding_dim
-            test_input_slots_raw = test_slots_hidden
-
-        # 2. Transformer reasoning
+        # 2. TRM Recursive Reasoning
+        batch_size, seq_len, hidden_size = sequence.shape
         hidden_states = sequence.to(self.forward_dtype)
+        slot_mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+        hidden_states = hidden_states * slot_mask
 
-        # Get rotary embeddings if using RoPE
-        # Slice to match actual sequence length
-        if self.rotary_emb is not None:
-            cos_full, sin_full = self.rotary_emb()
-            seq_len = hidden_states.shape[1]
-            cos_sin = (cos_full[:seq_len], sin_full[:seq_len])
+        # Initialize TRM inner carry if not provided
+        if carry is None:
+            # Create initial carry state
+            inner_carry = self.trm.inner.empty_carry(batch_size)
+            inner_carry = self.trm.inner.reset_carry(
+                torch.ones(batch_size, dtype=torch.bool, device=hidden_states.device),
+                inner_carry
+            )
+        else:
+            inner_carry = carry.inner_carry
+
+        # Get position encodings
+        if hasattr(self.trm.inner, 'rotary_emb'):
+            cos_sin = self.trm.inner.rotary_emb()
+            # Slice to match sequence length
+            if seq_len < cos_sin[0].shape[0]:
+                cos_sin = (cos_sin[0][:seq_len], cos_sin[1][:seq_len])
         else:
             cos_sin = None
 
-        # Apply transformer layers
+        seq_info = dict(cos_sin=cos_sin)
+
+        # Apply TRM recursive reasoning (H-cycles and L-cycles)
+        # We treat the slot sequence as the input embedding (bypassing TRM's embedding layer)
+        z_H, z_L = inner_carry.z_H, inner_carry.z_L
+        
+        # Ensure z_H and z_L match the sequence dimensions
+        if z_H.shape[1] != seq_len:
+            # Resize carry states to match sequence length
+            z_H = F.interpolate(
+                z_H.transpose(1, 2), 
+                size=seq_len, 
+                mode='linear', 
+                align_corners=False
+            ).transpose(1, 2)
+            z_L = F.interpolate(
+                z_L.transpose(1, 2), 
+                size=seq_len, 
+                mode='linear', 
+                align_corners=False
+            ).transpose(1, 2)
+        slot_mask = slot_mask.to(z_H.dtype)
+        z_H = z_H * slot_mask
+        z_L = z_L * slot_mask
+
         intermediate_states = []
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, cos_sin=cos_sin, attention_mask=attention_mask)
-            if return_intermediate:
-                intermediate_states.append(hidden_states.clone())
+        
+        # Recursive reasoning with gradient control (like TRM)
+        # H_cycles-1 without grad
+        with torch.no_grad():
+            for _H_step in range(self.config.H_cycles - 1):
+                for _L_step in range(self.config.L_cycles):
+                    z_L = self.trm.inner.L_level(z_L, z_H + hidden_states, **seq_info)
+                    z_L = z_L * slot_mask
+                z_H = self.trm.inner.L_level(z_H, z_L, **seq_info)
+                z_H = z_H * slot_mask
+                if return_intermediate:
+                    intermediate_states.append(z_H.clone())
+        
+        # Final H-cycle with grad
+        for _L_step in range(self.config.L_cycles):
+            z_L = self.trm.inner.L_level(z_L, z_H + hidden_states, **seq_info)
+            z_L = z_L * slot_mask
+        z_H = self.trm.inner.L_level(z_H, z_L, **seq_info)
+        z_H = z_H * slot_mask
+        
+        if return_intermediate:
+            intermediate_states.append(z_H.clone())
+
+        # Store final hidden states
+        hidden_states = z_H * slot_mask
+
+        # Compute Q-values for halting (if ACT enabled)
+        q_halt_logits = None
+        if self.config.halt_max_steps > 1:
+            # Use first position for Q-head (like TRM)
+            q_logits = self.trm.inner.q_head(z_H[:, 0]).to(torch.float32)
+            q_halt_logits = q_logits[..., 0]  # Halt Q-value
 
         # 3. Extract predicted slots
-        batch_size = hidden_states.shape[0]
         predicted_slots_list = []
-
         for b in range(batch_size):
             start, end = predict_positions[b]
             # Skip the PREDICT token, get only the slots
@@ -293,22 +325,10 @@ class ARCSlotSolver(nn.Module):
         predicted_slots = torch.stack(predicted_slots_list, dim=0)  # [batch, num_slots, hidden_size]
 
         # 4. Decode slots to grid
-        # Get target output size from first puzzle
         target_shapes = puzzle_batch['test_output_shapes']
-        # Use first test output shape from first puzzle as target
-        # (In practice, should handle variable sizes per puzzle)
-        if target_shapes[0][0] is not None:
-            target_h, target_w = target_shapes[0][0]
-        else:
-            # Default to test input size if output not available
-            target_h, target_w = puzzle_batch['test_input_shapes'][0][0]
-
-        # Decode all predictions with same target size for now
         predicted_grids = self.decoder(predicted_slots)  # [batch, output_channels, max_h, max_w]
 
-        # Crop to target size
-        predicted_grids = predicted_grids[:, :, :target_h, :target_w]
-
+        # Prepare result
         result = {
             'predicted_grids': predicted_grids,
             'predicted_slots': predicted_slots,
@@ -316,11 +336,19 @@ class ARCSlotSolver(nn.Module):
             'predict_positions': predict_positions,
         }
 
+        # Store carry state for ACT
+        new_inner_carry = self.trm.inner.__class__.__bases__[0].__name__  # Get carry class name
+        from models.trm import TinyRecursiveReasoningModel_ACTV1InnerCarry
+        result['carry'] = TinyRecursiveReasoningModel_ACTV1InnerCarry(
+            z_H=z_H.detach(), 
+            z_L=z_L.detach()
+        )
+
+        if q_halt_logits is not None:
+            result['q_halt_logits'] = q_halt_logits
+
         if return_intermediate:
             result['intermediate_states'] = intermediate_states
-
-        if return_test_input_slots and test_input_slots_raw is not None:
-            result['test_input_slots'] = test_input_slots_raw
 
         return result
 
@@ -331,24 +359,28 @@ class ARCSlotSolver(nn.Module):
         reduction: str = 'mean'
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute training loss (with optional multi-task learning).
+        Compute ARC puzzle solving loss.
+
+        NOTE: Contrastive learning is now handled separately via
+        compute_contrastive_loss_on_grids() with interleaved training.
 
         Args:
             puzzle_batch: Dict from ARCPuzzleDataset collate function
-            memory_bank: Optional MemoryBank for contrastive learning
+            memory_bank: Unused (kept for backward compatibility)
             reduction: 'mean', 'sum', or 'none'
 
         Returns:
             Dict with:
-                - loss: Total loss (ARC + optional contrastive)
-                - arc_loss: ARC puzzle solving loss
-                - contrastive_loss: Contrastive learning loss (if enabled)
+                - loss: ARC puzzle solving loss
+                - arc_loss: Same as loss
                 - pixel_accuracy: Accuracy metric
-                - contrastive_accuracy: Contrastive accuracy (if enabled)
+                - contrastive_loss: Always 0 (for backward compatibility)
+                - contrastive_accuracy: Always 0 (for backward compatibility)
+                - avg_positive_sim: Always 0 (for backward compatibility)
+                - avg_negative_sim: Always 0 (for backward compatibility)
         """
         # Forward pass
-        return_slots = self.use_contrastive and memory_bank is not None
-        output = self.forward(puzzle_batch, return_test_input_slots=return_slots)
+        output = self.forward(puzzle_batch)
         predicted_grids = output['predicted_grids']  # [batch, output_channels, H, W]
 
         # Get ground truth
@@ -356,23 +388,33 @@ class ARCSlotSolver(nn.Module):
         test_output_available = puzzle_batch['test_output_available']  # [batch, max_test]
 
         # Use first test output
-        targets = test_outputs[:, 0]  # [batch, H, W]
+        targets = test_outputs[:, 0]  # [batch, max_h, max_w]
         available = test_output_available[:, 0]  # [batch]
 
-        # Get target size
         batch_size, _, H, W = predicted_grids.shape
 
-        # Ensure targets match prediction size (crop or pad)
-        if targets.shape[1:] != (H, W):
-            targets_resized = torch.zeros(batch_size, H, W, dtype=targets.dtype, device=targets.device)
-            for b in range(batch_size):
-                h, w = min(targets.shape[1], H), min(targets.shape[2], W)
-                targets_resized[b, :h, :w] = targets[b, :h, :w]
-            targets = targets_resized
+        # Build per-example spatial masks so loss is computed only on valid pixels
+        spatial_mask = torch.zeros(batch_size, H, W, dtype=torch.bool, device=predicted_grids.device)
+        target_shapes = puzzle_batch['test_output_shapes']
+        input_shapes = puzzle_batch['test_input_shapes']
+        targets_resized = torch.zeros(batch_size, H, W, dtype=targets.dtype, device=targets.device)
+        for b in range(batch_size):
+            target_shape = None
+            if b < len(target_shapes) and len(target_shapes[b]) > 0:
+                target_shape = target_shapes[b][0]
+            if target_shape is None and b < len(input_shapes) and len(input_shapes[b]) > 0:
+                target_shape = input_shapes[b][0]
+            if target_shape is None:
+                target_shape = (H, W)
+            h, w = target_shape
+            spatial_mask[b, :h, :w] = True
+            targets_resized[b, :h, :w] = targets[b, :h, :w]
+        targets = targets_resized
 
-        # ============================================
-        # 1. ARC Puzzle Solving Loss (Cross-Entropy)
-        # ============================================
+        valid_pixels = spatial_mask & available.view(-1, 1, 1)
+        valid_pixel_count = valid_pixels.sum().clamp_min(1)
+
+        # ARC Puzzle Solving Loss (Cross-Entropy)
         # predicted_grids: [batch, num_colors, H, W]
         # targets: [batch, H, W] with values 0-9
 
@@ -382,84 +424,31 @@ class ARCSlotSolver(nn.Module):
             reduction='none'  # [batch, H, W]
         )
 
-        # Mask out invalid examples
-        loss_per_pixel = loss_per_pixel * available.view(-1, 1, 1).float()
+        # Mask out invalid pixels
+        weighted_loss = loss_per_pixel * valid_pixels.float()
 
         if reduction == 'mean':
-            arc_loss = loss_per_pixel.sum() / (available.sum() * H * W + 1e-8)
+            arc_loss = weighted_loss.sum() / valid_pixel_count.float()
         elif reduction == 'sum':
-            arc_loss = loss_per_pixel.sum()
+            arc_loss = weighted_loss.sum()
         else:
-            arc_loss = loss_per_pixel
+            arc_loss = weighted_loss
 
         # Compute pixel accuracy
         with torch.no_grad():
             predictions = predicted_grids.argmax(dim=1)  # [batch, H, W]
-            correct = (predictions == targets).float()
-            correct = correct * available.view(-1, 1, 1).float()
-            pixel_accuracy = correct.sum() / (available.sum() * H * W + 1e-8)
+            correct = ((predictions == targets) & valid_pixels).float()
+            pixel_accuracy = correct.sum() / valid_pixel_count.float()
 
-        # ============================================
-        # 2. Contrastive Learning Loss (Optional)
-        # ============================================
-        contrastive_loss = torch.tensor(0.0, device=arc_loss.device)
-        contrastive_accuracy = torch.tensor(0.0, device=arc_loss.device)
-        avg_positive_sim = torch.tensor(0.0, device=arc_loss.device)
-        avg_negative_sim = torch.tensor(0.0, device=arc_loss.device)
-
-        if self.use_contrastive and memory_bank is not None and 'test_input_slots' in output:
-            # Get test input slots
-            test_slots = output['test_input_slots']  # [batch, num_slots, hidden_size]
-
-            # Pool slots (mean across slots)
-            pooled_slots = test_slots.mean(dim=1)  # [batch, hidden_size]
-
-            # Project to embedding space
-            embeddings = self.contrastive_projection(pooled_slots)  # [batch, embedding_dim]
-            embeddings = F.normalize(embeddings, dim=1)
-
-            # Get puzzle indices (integer IDs for memory bank)
-            # Each puzzle's test input is a unique instance
-            puzzle_indices = puzzle_batch['puzzle_indices']  # [batch] - integer tensor
-
-            # Get stored embeddings from memory bank
-            stored_embeddings = memory_bank.get(puzzle_indices)
-
-            # Sample negative embeddings
-            negative_embeddings = memory_bank.sample_negatives(
-                num_negatives=self.contrastive_num_negatives,
-                exclude_ids=puzzle_indices
-            )
-
-            # Compute contrastive loss
-            contrastive_loss, contrastive_metrics = self.contrastive_criterion(
-                embeddings, stored_embeddings, negative_embeddings
-            )
-
-            contrastive_accuracy = torch.tensor(contrastive_metrics['accuracy'], device=arc_loss.device)
-            avg_positive_sim = torch.tensor(contrastive_metrics['avg_positive_sim'], device=arc_loss.device)
-            avg_negative_sim = torch.tensor(contrastive_metrics['avg_negative_sim'], device=arc_loss.device)
-
-            # Update memory bank (no gradients)
-            with torch.no_grad():
-                memory_bank.update(puzzle_indices, embeddings.detach())
-
-        # ============================================
-        # 3. Combine Losses (Multi-Task Learning)
-        # ============================================
-        if self.use_contrastive and memory_bank is not None:
-            total_loss = arc_loss + self.contrastive_loss_weight * contrastive_loss
-        else:
-            total_loss = arc_loss
-
+        # Return loss (contrastive fields are 0 for backward compatibility)
         return {
-            'loss': total_loss,
+            'loss': arc_loss,
             'arc_loss': arc_loss,
-            'contrastive_loss': contrastive_loss,
             'pixel_accuracy': pixel_accuracy,
-            'contrastive_accuracy': contrastive_accuracy,
-            'avg_positive_sim': avg_positive_sim,
-            'avg_negative_sim': avg_negative_sim,
+            'contrastive_loss': torch.tensor(0.0, device=arc_loss.device),
+            'contrastive_accuracy': torch.tensor(0.0, device=arc_loss.device),
+            'avg_positive_sim': torch.tensor(0.0, device=arc_loss.device),
+            'avg_negative_sim': torch.tensor(0.0, device=arc_loss.device),
         }
 
     @torch.no_grad()
@@ -485,6 +474,78 @@ class ARCSlotSolver(nn.Module):
         predictions = predicted_grids.argmax(dim=1)  # [batch, H, W]
 
         return predictions
+
+    def compute_contrastive_loss_on_grids(
+        self,
+        grid_batch: Dict[str, torch.Tensor],
+        memory_bank: MemoryBank
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute contrastive loss on individual grids (for instance recognition).
+
+        This is a separate, simpler forward pass that:
+        1. Encodes individual grids through CNN + slot encoder
+        2. Pools slots to get grid-level embeddings
+        3. Computes contrastive loss against memory bank
+
+        Args:
+            grid_batch: Dict from GridDataset collate function with:
+                - grids: [batch, H, W]
+                - puzzle_indices: [batch]
+                - shapes: List of (H, W) tuples
+            memory_bank: MemoryBank for negative sampling
+
+        Returns:
+            Dict with:
+                - loss: Contrastive loss
+                - accuracy: Contrastive accuracy
+                - avg_positive_sim: Average positive similarity
+                - avg_negative_sim: Average negative similarity
+        """
+        grids = grid_batch['grids']  # [batch, H, W] with long dtype
+        puzzle_indices = grid_batch['puzzle_indices']  # [batch]
+        shapes = grid_batch['shapes']  # List of (H, W) tuples
+
+        batch_size, H, W = grids.shape
+        device = grids.device
+
+        # 1. Encode grids through CNN
+        features = self.cnn_encoder(grids)  # [batch, H*W, slot_dim]
+
+        # 2. Apply slot attention
+        slots = self.slot_encoder(features, spatial_size=(H, W))  # [batch, num_slots, hidden_size]
+
+        # 3. Pool slots (mean across slots)
+        pooled_slots = slots.mean(dim=1)  # [batch, hidden_size]
+
+        # 4. Project to embedding space
+        embeddings = self.contrastive_projection(pooled_slots)  # [batch, embedding_dim]
+        embeddings = F.normalize(embeddings, dim=1)
+
+        # 5. Get stored embeddings from memory bank
+        stored_embeddings = memory_bank.get(puzzle_indices)
+
+        # 6. Sample negative embeddings
+        negative_embeddings = memory_bank.sample_negatives(
+            num_negatives=self.contrastive_num_negatives,
+            exclude_ids=puzzle_indices
+        )
+
+        # 7. Compute contrastive loss
+        contrastive_loss, metrics = self.contrastive_criterion(
+            embeddings, stored_embeddings, negative_embeddings
+        )
+
+        # 8. Update memory bank (no gradients)
+        with torch.no_grad():
+            memory_bank.update(puzzle_indices, embeddings.detach())
+
+        return {
+            'loss': contrastive_loss,
+            'accuracy': torch.tensor(metrics['accuracy'], device=device),
+            'avg_positive_sim': torch.tensor(metrics['avg_positive_sim'], device=device),
+            'avg_negative_sim': torch.tensor(metrics['avg_negative_sim'], device=device),
+        }
 
     @torch.no_grad()
     def predict_with_tta(

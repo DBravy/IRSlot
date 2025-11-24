@@ -22,13 +22,19 @@ class CNNEncoder(nn.Module):
         hidden_dim: int,
         slot_dim: int,
         forward_dtype: torch.dtype = torch.bfloat16,
+        num_colors: int = 10,
     ):
         super().__init__()
         self.forward_dtype = forward_dtype
+        self.num_colors = num_colors
+        
+        # Color embedding layer - treats colors as categorical, not continuous
+        # This is critical for learning discriminative representations
+        self.color_embedding = nn.Embedding(num_colors, hidden_dim)
 
         # Simple CNN: grid -> features
         self.encoder = nn.Sequential(
-            nn.Conv2d(input_channels, hidden_dim, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2),
             nn.ReLU(inplace=True),
@@ -41,15 +47,27 @@ class CNNEncoder(nn.Module):
     def forward(self, grid: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            grid: [batch, channels, height, width] or [batch, height, width]
+            grid: [batch, height, width] with integer values 0-9 (colors)
+                 OR [batch, channels, height, width] (if already embedded)
         Returns:
             features: [batch, num_positions, slot_dim]
         """
-        if grid.ndim == 3:
+        # Handle integer grids (most common case for ARC)
+        if grid.ndim == 3 and grid.dtype in [torch.long, torch.int, torch.int32, torch.int64]:
+            # Embed colors: [batch, H, W] -> [batch, H, W, hidden_dim]
+            x = self.color_embedding(grid)
+            # Permute to [batch, hidden_dim, H, W] for conv layers
+            x = x.permute(0, 3, 1, 2).to(self.forward_dtype)
+        elif grid.ndim == 3:
+            # Treat as single-channel continuous input (for backwards compatibility)
             grid = grid.unsqueeze(1)  # Add channel dimension
+            x = grid.to(self.forward_dtype)
+        else:
+            # Already has channel dimension
+            x = grid.to(self.forward_dtype)
 
         # Encode
-        features = self.encoder(grid.to(self.forward_dtype))  # [batch, slot_dim, height, width]
+        features = self.encoder(x)  # [batch, slot_dim, height, width]
 
         # Flatten spatial dimensions
         batch_size, slot_dim, h, w = features.shape
@@ -286,11 +304,13 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                 input_channels=self.config.grid_channels,
                 hidden_dim=self.config.cnn_hidden_dim,
                 slot_dim=self.config.slot_dim,
-                forward_dtype=self.forward_dtype
+                forward_dtype=self.forward_dtype,
+                num_colors=10  # ARC has 10 colors (0-9)
             )
             self.slot_encoder = SlotAttentionEncoder(
                 num_slots=self.config.num_slots,
                 slot_dim=self.config.slot_dim,
+                feature_dim=self.config.slot_dim,
                 hidden_size=self.config.hidden_size,
                 num_iterations=self.config.slot_iterations,
                 mlp_hidden_size=self.config.slot_mlp_hidden,
