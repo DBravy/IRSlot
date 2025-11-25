@@ -465,11 +465,29 @@ def initialize_training(config):
     criterion = InfoNCELoss(temperature=config['temperature'])
     color_entropy_loss = ColorEntropyLoss(num_colors=10)
     color_entropy_weight = config.get('color_entropy_weight', 0.1)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config['lr'],
-        weight_decay=config.get('weight_decay', 0.0)
-    )
+
+    # Check if we need separate learning rate for color embeddings
+    color_embed_lr = config.get('color_embed_lr', None)
+    main_lr = config['lr']
+
+    if model_type == 'color_aware' and color_embed_lr is not None:
+        # Use parameter groups: separate LR for color embeddings
+        color_embed_params = list(model.color_embedding.parameters())
+        color_embed_param_ids = set(id(p) for p in color_embed_params)
+        other_params = [p for p in model.parameters() if id(p) not in color_embed_param_ids]
+
+        print(f"  Using separate LR for color embeddings: {color_embed_lr} (main LR: {main_lr})")
+        optimizer = torch.optim.AdamW([
+            {'params': other_params, 'lr': main_lr},
+            {'params': color_embed_params, 'lr': color_embed_lr}
+        ], weight_decay=config.get('weight_decay', 0.0))
+    else:
+        # Use single learning rate for all parameters
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=main_lr,
+            weight_decay=config.get('weight_decay', 0.0)
+        )
 
     # Store components
     training_components.update({
@@ -509,6 +527,10 @@ def initialize_training(config):
     # Add max_puzzles if it was specified
     if 'max_puzzles' in config:
         state_config['max_puzzles'] = config['max_puzzles']
+
+    # Add color_embed_lr if it was specified
+    if color_embed_lr is not None:
+        state_config['color_embed_lr'] = color_embed_lr
 
     training_state['config'] = state_config
 

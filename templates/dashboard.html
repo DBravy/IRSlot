@@ -349,6 +349,12 @@
                 </div>
 
                 <div>
+                    <label class="form-label">Color Embed LR (for color-aware)</label>
+                    <input type="number" id="color_embed_lr" class="form-input" placeholder="Same as main LR" step="0.0001">
+                    <span style="color: #666; font-size: 0.75em;">Leave blank to use main LR</span>
+                </div>
+
+                <div>
                     <label class="form-label">Number of Epochs</label>
                     <input type="number" id="num_epochs" class="form-input" value="100">
                 </div>
@@ -818,6 +824,12 @@
                 config.max_puzzles = parseInt(maxPuzzles);
             }
 
+            // Add color_embed_lr if specified (otherwise uses main lr)
+            const colorEmbedLr = document.getElementById('color_embed_lr').value;
+            if (colorEmbedLr && colorEmbedLr.trim() !== '') {
+                config.color_embed_lr = parseFloat(colorEmbedLr);
+            }
+
             return config;
         }
 
@@ -1143,6 +1155,11 @@
 
                         // Update hard attention label after loading
                         updateHardAttentionLabel();
+
+                        // Handle optional fields that might not be in saved config
+                        if (!data.config.color_embed_lr) {
+                            document.getElementById('color_embed_lr').value = '';
+                        }
 
                         updateConfigStatus(configSaved);
                     }
