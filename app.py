@@ -24,7 +24,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO
 from torch.utils.data import DataLoader
 
-from model import SlotInstanceModel, HierarchicalSlotModel
+from model import SlotInstanceModel, HierarchicalSlotModel, ColorAwareSpatialSlotModel
 from memory_bank import MemoryBank
 from loss import InfoNCELoss, ColorEntropyLoss
 from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
@@ -220,8 +220,8 @@ def generate_attention_visualizations(grids, attn_weights, original_shapes, num_
 def generate_hierarchical_visualizations(grids, attn_weights, original_shapes, num_samples=3):
     """
     Generate visualizations for HierarchicalSlotModel showing both layers:
-    - Layer 1: Color segmentation masks (hard-coded - which pixels belong to each color)
-    - Layer 2: Slot-to-color attention (which colors each slot attends to)
+    - Row 1: Original grid + spatial slot attention (projected from color attention)
+    - Row 2: Slot-to-color attention heatmap
 
     Args:
         grids: [B, H, W] - Input grids (padded)
@@ -256,16 +256,25 @@ def generate_hierarchical_visualizations(grids, attn_weights, original_shapes, n
         # Find which colors are actually present in this grid
         present_colors = np.unique(grid).astype(int)
 
+        # ============= PROJECT LAYER 2 ATTENTION BACK TO SPATIAL =============
+        # For each slot, compute spatial attention by looking up color attention
+        # spatial_attn[slot, i, j] = slot_color_attn[slot, grid[i,j]]
+        spatial_attn = np.zeros((num_slots, H, W))
+        for slot_idx in range(num_slots):
+            for i in range(H):
+                for j in range(W):
+                    color = int(grid[i, j])
+                    spatial_attn[slot_idx, i, j] = slot_color_attn[slot_idx, color]
+
         # Create figure with 2 rows:
-        # Row 1: Original grid + color masks for present colors
+        # Row 1: Original grid + spatial slot attention masks
         # Row 2: Slot-to-color attention heatmap
-        num_present = len(present_colors)
-        fig = plt.figure(figsize=(max(12, 2 * (num_present + 1)), 6))
+        fig = plt.figure(figsize=(3 * (num_slots + 1), 6))
 
         # Create grid spec for two rows
-        gs = fig.add_gridspec(2, max(num_slots, num_present + 1), hspace=0.4)
+        gs = fig.add_gridspec(2, num_slots + 1, hspace=0.3)
 
-        # ============= ROW 1: Color Segmentation (Layer 1) =============
+        # ============= ROW 1: Spatial Slot Attention (Layer 2 projected) =============
         # Plot original grid
         ax_grid = fig.add_subplot(gs[0, 0])
         grid_img = np.zeros((H, W, 3))
@@ -282,33 +291,25 @@ def generate_hierarchical_visualizations(grids, attn_weights, original_shapes, n
         ax_grid.set_title('Input Grid', fontsize=9, color='white')
         ax_grid.axis('off')
 
-        # Plot color masks for present colors only
-        for idx, color_id in enumerate(present_colors):
-            ax_mask = fig.add_subplot(gs[0, idx + 1])
-            mask = (grid == color_id).astype(float)
+        # Plot spatial attention for each slot
+        for slot_idx in range(num_slots):
+            ax_slot = fig.add_subplot(gs[0, slot_idx + 1])
+            mask = spatial_attn[slot_idx]  # [H, W]
 
-            # Create colored mask
-            color_hex = ARC_COLORS[color_id]
-            r = int(color_hex[1:3], 16) / 255.0
-            g = int(color_hex[3:5], 16) / 255.0
-            b = int(color_hex[5:7], 16) / 255.0
+            # Show as heatmap
+            im = ax_slot.imshow(mask, cmap='hot', interpolation='nearest', vmin=0, vmax=spatial_attn.max())
+            ax_slot.set_title(f'Slot {slot_idx}', fontsize=9, color='white')
+            ax_slot.axis('off')
 
-            colored_mask = np.zeros((H, W, 3))
-            colored_mask[mask == 1] = [r, g, b]
-
-            ax_mask.imshow(colored_mask, interpolation='nearest')
-            ax_mask.set_title(f'{ARC_COLOR_NAMES[color_id]}', fontsize=8, color='white')
-            ax_mask.axis('off')
-
-        # ============= ROW 2: Slot-to-Color Attention (Layer 2) =============
+        # ============= ROW 2: Slot-to-Color Attention (Layer 2 raw) =============
         # Create a heatmap showing which colors each slot attends to
         ax_heatmap = fig.add_subplot(gs[1, :])
 
         # Only show attention for colors that are present in the grid
         attn_present = slot_color_attn[:, present_colors]  # [num_slots, num_present]
 
-        # Create heatmap
-        im = ax_heatmap.imshow(attn_present, cmap='YlOrRd', aspect='auto', vmin=0, vmax=attn_present.max())
+        # Create heatmap (use 'hot' colormap like spatial attention)
+        im = ax_heatmap.imshow(attn_present, cmap='hot', aspect='auto', vmin=0, vmax=attn_present.max())
 
         # Labels
         ax_heatmap.set_yticks(range(num_slots))
@@ -404,6 +405,19 @@ def initialize_training(config):
             num_colors=10,
             encoder_feature_dim=config['encoder_feature_dim'],
             encoder_hidden_dim=config['encoder_hidden_dim'],
+            num_slots=config['num_slots'],
+            slot_dim=config['slot_dim'],
+            num_iterations=config['num_iterations'],
+            embedding_dim=config['embedding_dim'],
+            max_grid_size=30
+        ).to(device)
+    elif model_type == 'color_aware':
+        print(f"  Using ColorAwareSpatialSlotModel (spatial attention + learned color embeddings)")
+        model = ColorAwareSpatialSlotModel(
+            num_colors=10,
+            encoder_feature_dim=config['encoder_feature_dim'],
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            color_embed_dim=config.get('color_embed_dim', 32),
             num_slots=config['num_slots'],
             slot_dim=config['slot_dim'],
             num_iterations=config['num_iterations'],

@@ -342,3 +342,142 @@ class HierarchicalSlotModel(nn.Module):
         """
         _, _, attn = self.forward(grids, return_attn=True)
         return attn
+
+
+class ColorAwareSpatialSlotModel(nn.Module):
+    """
+    Spatial slot attention with learned color embeddings.
+
+    Architecture:
+    1. Grid Encoder: Converts grid to per-pixel feature maps
+    2. Color Embedding: Adds learned color embedding to each pixel's features
+    3. Spatial Slot Attention: Slots compete over H×W spatial positions
+    4. Projection: Projects to embedding space for contrastive learning
+
+    Key insight: By adding color embeddings, pixels of the same color have similar
+    feature vectors, naturally encouraging slots to group same-colored regions.
+    But unlike HierarchicalSlotModel, slots still compete over spatial positions,
+    allowing for finer-grained spatial reasoning.
+    """
+    def __init__(
+        self,
+        num_colors=10,
+        encoder_feature_dim=64,
+        encoder_hidden_dim=128,
+        color_embed_dim=32,  # Dimension of learned color embeddings
+        num_slots=7,
+        slot_dim=64,
+        num_iterations=3,
+        embedding_dim=128,
+        max_grid_size=30
+    ):
+        """
+        Args:
+            num_colors: Number of colors in ARC grids (0-9 = 10 colors)
+            encoder_feature_dim: Feature dimension from encoder
+            encoder_hidden_dim: Hidden dimension in encoder
+            color_embed_dim: Dimension of learned color embeddings
+            num_slots: Number of slots for slot attention
+            slot_dim: Dimension of each slot
+            num_iterations: Number of slot attention iterations
+            embedding_dim: Final embedding dimension for contrastive learning
+            max_grid_size: Maximum grid size (30 for ARC)
+        """
+        super().__init__()
+        self.num_colors = num_colors
+        self.num_slots = num_slots
+        self.slot_dim = slot_dim
+        self.embedding_dim = embedding_dim
+        self.color_embed_dim = color_embed_dim
+
+        # Encoder: Grid -> Per-pixel features
+        self.encoder = ARCGridEncoder(
+            num_colors=num_colors,
+            feature_dim=encoder_feature_dim,
+            hidden_dim=encoder_hidden_dim
+        )
+
+        # Learned color embeddings: each color gets a learned vector
+        self.color_embedding = nn.Embedding(num_colors, color_embed_dim)
+
+        # Total feature dim = CNN features + color embeddings
+        total_feature_dim = encoder_feature_dim + color_embed_dim
+
+        # Spatial Slot Attention (with positional encoding)
+        self.slot_attention = SlotAttention(
+            num_slots=num_slots,
+            slot_dim=slot_dim,
+            feature_dim=total_feature_dim,
+            num_iterations=num_iterations,
+            hidden_dim=128,
+            max_spatial_size=max_grid_size
+        )
+
+        # Projection head: Slots -> Embedding
+        self.projection_head = nn.Sequential(
+            nn.Linear(slot_dim, slot_dim),
+            nn.ReLU(),
+            nn.Linear(slot_dim, embedding_dim)
+        )
+
+    def forward(self, grids, return_attn=False):
+        """
+        Forward pass.
+
+        Args:
+            grids: [B, H, W] - Input grids with integer values 0-9
+            return_attn: If True, return attention weights from slot attention
+
+        Returns:
+            embeddings: [B, embedding_dim] - Final embeddings for contrastive learning
+            slots: [B, num_slots, slot_dim] - Intermediate slot representations
+            attn_weights: [B, num_slots, H, W] - Spatial attention masks (only if return_attn=True)
+        """
+        B, H, W = grids.shape
+        N = H * W
+
+        # Step 1: Encode grids to per-pixel CNN features
+        # [B, H, W] -> [B, H*W, encoder_feature_dim]
+        cnn_features = self.encoder(grids)
+
+        # Step 2: Get color embeddings for each pixel
+        # Flatten grid: [B, H, W] -> [B, H*W]
+        grids_flat = grids.reshape(B, N)
+        # Look up color embeddings: [B, H*W] -> [B, H*W, color_embed_dim]
+        color_embeds = self.color_embedding(grids_flat)
+
+        # Step 3: Concatenate CNN features and color embeddings
+        # [B, H*W, encoder_feature_dim + color_embed_dim]
+        combined_features = torch.cat([cnn_features, color_embeds], dim=-1)
+
+        # Step 4: Apply spatial slot attention
+        # [B, H*W, total_feature_dim] -> [B, num_slots, slot_dim]
+        if return_attn:
+            slots, attn_weights = self.slot_attention(combined_features, spatial_size=(H, W), return_attn=True)
+            # Reshape attention weights from [B, num_slots, H*W] to [B, num_slots, H, W]
+            attn_weights = attn_weights.reshape(B, self.num_slots, H, W)
+        else:
+            slots = self.slot_attention(combined_features, spatial_size=(H, W))
+
+        # Step 5: Pool slots to get single representation
+        pooled = slots.mean(dim=1)
+
+        # Step 6: Project to embedding space
+        embeddings = self.projection_head(pooled)
+
+        # Normalize embeddings for contrastive learning
+        embeddings = F.normalize(embeddings, dim=1)
+
+        if return_attn:
+            return embeddings, slots, attn_weights
+        return embeddings, slots
+
+    def get_embeddings(self, grids):
+        """Convenience method to get just embeddings."""
+        embeddings, _ = self.forward(grids)
+        return embeddings
+
+    def get_slots(self, grids):
+        """Convenience method to get just slots."""
+        _, slots = self.forward(grids)
+        return slots
