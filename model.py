@@ -27,7 +27,9 @@ class SlotInstanceModel(nn.Module):
         slot_dim=64,
         num_iterations=3,
         embedding_dim=128,
-        max_grid_size=30
+        max_grid_size=30,
+        hard_attention=False,
+        gumbel_temperature=1.0
     ):
         """
         Args:
@@ -39,6 +41,8 @@ class SlotInstanceModel(nn.Module):
             num_iterations: Number of slot attention iterations
             embedding_dim: Final embedding dimension for contrastive learning
             max_grid_size: Maximum grid size (30 for ARC)
+            hard_attention: If True, use Gumbel-Softmax for binary attention
+            gumbel_temperature: Temperature for Gumbel-Softmax (lower = harder)
         """
         super().__init__()
         self.num_colors = num_colors
@@ -60,7 +64,9 @@ class SlotInstanceModel(nn.Module):
             feature_dim=encoder_feature_dim,
             num_iterations=num_iterations,
             hidden_dim=128,
-            max_spatial_size=max_grid_size
+            max_spatial_size=max_grid_size,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
         )
 
         # Projection head: Slots -> Embedding
@@ -165,6 +171,8 @@ class HierarchicalSlotModel(nn.Module):
         embedding_dim=128,
         max_grid_size=30,
         color_feature_dim=None,  # If None, uses encoder_feature_dim
+        hard_attention=False,
+        gumbel_temperature=1.0
     ):
         """
         Args:
@@ -177,6 +185,8 @@ class HierarchicalSlotModel(nn.Module):
             embedding_dim: Final embedding dimension for contrastive learning
             max_grid_size: Maximum grid size (30 for ARC)
             color_feature_dim: Dimension of color features (default: encoder_feature_dim)
+            hard_attention: If True, use Gumbel-Softmax for binary attention
+            gumbel_temperature: Temperature for Gumbel-Softmax (lower = harder)
         """
         super().__init__()
         self.num_colors = num_colors
@@ -213,7 +223,9 @@ class HierarchicalSlotModel(nn.Module):
             slot_dim=slot_dim,
             feature_dim=total_color_feature_dim,
             num_iterations=num_iterations,
-            hidden_dim=128
+            hidden_dim=128,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
         )
 
         # Projection head: Slots -> Embedding
@@ -364,12 +376,14 @@ class ColorAwareSpatialSlotModel(nn.Module):
         num_colors=10,
         encoder_feature_dim=64,
         encoder_hidden_dim=128,
-        color_embed_dim=32,  # Dimension of learned color embeddings
+        color_embed_dim=32,
         num_slots=7,
         slot_dim=64,
         num_iterations=3,
         embedding_dim=128,
-        max_grid_size=30
+        max_grid_size=30,
+        hard_attention=False,
+        gumbel_temperature=1.0
     ):
         """
         Args:
@@ -382,6 +396,8 @@ class ColorAwareSpatialSlotModel(nn.Module):
             num_iterations: Number of slot attention iterations
             embedding_dim: Final embedding dimension for contrastive learning
             max_grid_size: Maximum grid size (30 for ARC)
+            hard_attention: If True, use Gumbel-Softmax for binary attention
+            gumbel_temperature: Temperature for Gumbel-Softmax (lower = harder)
         """
         super().__init__()
         self.num_colors = num_colors
@@ -410,7 +426,9 @@ class ColorAwareSpatialSlotModel(nn.Module):
             feature_dim=total_feature_dim,
             num_iterations=num_iterations,
             hidden_dim=128,
-            max_spatial_size=max_grid_size
+            max_spatial_size=max_grid_size,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
         )
 
         # Projection head: Slots -> Embedding

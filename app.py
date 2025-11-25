@@ -64,6 +64,7 @@ batch_history = {
     'accuracy': [],
     'pos_sim': [],
     'neg_sim': [],
+    'color_entropy': [],
 }
 
 # Saved configuration (separate from training_state to persist across sessions)
@@ -399,6 +400,14 @@ def initialize_training(config):
     # Create model
     print("Creating model...")
     model_type = config.get('model_type', 'standard')
+    hard_attention = config.get('hard_attention', False)
+    gumbel_temperature = config.get('gumbel_temperature', 1.0)
+
+    if hard_attention:
+        print(f"  Using HARD attention (Gumbel-Softmax) with temperature={gumbel_temperature}")
+    else:
+        print(f"  Using soft attention (standard)")
+
     if model_type == 'hierarchical':
         print(f"  Using HierarchicalSlotModel (hard-coded color segmentation)")
         model = HierarchicalSlotModel(
@@ -409,7 +418,9 @@ def initialize_training(config):
             slot_dim=config['slot_dim'],
             num_iterations=config['num_iterations'],
             embedding_dim=config['embedding_dim'],
-            max_grid_size=30
+            max_grid_size=30,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
         ).to(device)
     elif model_type == 'color_aware':
         print(f"  Using ColorAwareSpatialSlotModel (spatial attention + learned color embeddings)")
@@ -422,7 +433,9 @@ def initialize_training(config):
             slot_dim=config['slot_dim'],
             num_iterations=config['num_iterations'],
             embedding_dim=config['embedding_dim'],
-            max_grid_size=30
+            max_grid_size=30,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
         ).to(device)
     else:
         print(f"  Using SlotInstanceModel (standard)")
@@ -434,7 +447,9 @@ def initialize_training(config):
             slot_dim=config['slot_dim'],
             num_iterations=config['num_iterations'],
             embedding_dim=config['embedding_dim'],
-            max_grid_size=30
+            max_grid_size=30,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
         ).to(device)
 
     # Create memory bank
@@ -487,6 +502,7 @@ def initialize_training(config):
         'temperature': config['temperature'],
         'num_negatives': config['num_negatives'],
         'batch_log_interval': config.get('batch_log_interval', 10),
+        'color_entropy_weight': color_entropy_weight,
         'device': device,
     }
 
@@ -534,6 +550,7 @@ def train_epoch(epoch):
     step_accuracy = 0.0
     step_pos_sim = 0.0
     step_neg_sim = 0.0
+    step_color_entropy = 0.0
     step_batch_count = 0
 
     for batch_idx, batch in enumerate(dataloader):
@@ -583,6 +600,9 @@ def train_epoch(epoch):
         # Update memory bank
         memory_bank.update(grid_ids, embeddings.detach())
 
+        # Calculate weighted entropy contribution to loss
+        weighted_entropy_contribution = color_entropy_weight * entropy_metrics['color_entropy']
+
         # Track metrics (keep raw values for epoch averages)
         total_loss += loss.item()
         total_accuracy += metrics['accuracy']
@@ -596,6 +616,7 @@ def train_epoch(epoch):
         step_accuracy += metrics['accuracy']
         step_pos_sim += metrics['avg_positive_sim']
         step_neg_sim += metrics['avg_negative_sim']
+        step_color_entropy += weighted_entropy_contribution  # Track weighted contribution
         step_batch_count += 1
 
         # Send batch update every N batches (configurable, 1-based)
@@ -609,12 +630,14 @@ def train_epoch(epoch):
             avg_step_accuracy = step_accuracy / step_batch_count if step_batch_count > 0 else 0.0
             avg_step_pos_sim = step_pos_sim / step_batch_count if step_batch_count > 0 else 0.0
             avg_step_neg_sim = step_neg_sim / step_batch_count if step_batch_count > 0 else 0.0
+            avg_step_color_entropy = step_color_entropy / step_batch_count if step_batch_count > 0 else 0.0
 
             # Prepare JSON-safe metrics
             safe_loss = _sanitize_metric(avg_step_loss)
             safe_acc = _sanitize_metric(avg_step_accuracy)
             safe_pos_sim = _sanitize_metric(avg_step_pos_sim)
             safe_neg_sim = _sanitize_metric(avg_step_neg_sim)
+            safe_color_entropy = _sanitize_metric(avg_step_color_entropy)
 
             emission_count += 1
             print(f"Emitting batch_update #{emission_count}: epoch={epoch}, batch={batch_idx + 1}/{len(dataloader)}, step={current_step}, loss={safe_loss:.4f}")
@@ -625,6 +648,7 @@ def train_epoch(epoch):
             batch_history['accuracy'].append(safe_acc)
             batch_history['pos_sim'].append(safe_pos_sim)
             batch_history['neg_sim'].append(safe_neg_sim)
+            batch_history['color_entropy'].append(safe_color_entropy)
 
             # Apply mild downsampling to prevent unbounded memory growth
             # Keep last 2000 points at full resolution, downsample older data
@@ -651,6 +675,7 @@ def train_epoch(epoch):
                     'accuracy': safe_acc,
                     'avg_positive_sim': safe_pos_sim,
                     'avg_negative_sim': safe_neg_sim,
+                    'color_entropy': safe_color_entropy,
                 })
                 socketio.sleep(0.001)  # Small yield to allow the message to be sent
             except Exception as e:
@@ -661,6 +686,7 @@ def train_epoch(epoch):
             step_accuracy = 0.0
             step_pos_sim = 0.0
             step_neg_sim = 0.0
+            step_color_entropy = 0.0
             step_batch_count = 0
 
         # Generate and send attention visualizations every 20 batches
@@ -940,6 +966,7 @@ def api_start():
             batch_history['accuracy'] = []
             batch_history['pos_sim'] = []
             batch_history['neg_sim'] = []
+            batch_history['color_entropy'] = []
 
         # Use saved configuration
         config = saved_config

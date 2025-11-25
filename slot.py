@@ -6,11 +6,14 @@ import torch.nn.functional as F
 class SlotAttention(nn.Module):
     """
     Slot Attention module for object-centric learning.
-    
+
     Based on "Object-Centric Learning with Slot Attention" (Locatello et al., 2020).
     Learns to decompose input features into a fixed number of slots through iterative attention.
+
+    Supports optional hard/binary attention via Gumbel-Softmax for discrete slot assignment.
     """
-    def __init__(self, num_slots, slot_dim, feature_dim, num_iterations=3, hidden_dim=128, eps=1e-8, max_spatial_size=30):
+    def __init__(self, num_slots, slot_dim, feature_dim, num_iterations=3, hidden_dim=128, eps=1e-8, max_spatial_size=30,
+                 hard_attention=False, gumbel_temperature=1.0):
         super().__init__()
         self.num_slots = num_slots
         self.slot_dim = slot_dim
@@ -18,6 +21,8 @@ class SlotAttention(nn.Module):
         self.num_iterations = num_iterations
         self.eps = eps
         self.max_spatial_size = max_spatial_size
+        self.hard_attention = hard_attention
+        self.gumbel_temperature = gumbel_temperature
         
         # Learned 2D spatial positional encodings
         # These will be added to input features to give spatial awareness
@@ -103,11 +108,26 @@ class SlotAttention(nn.Module):
             # Compute attention weights
             # [B, num_slots, slot_dim] @ [B, slot_dim, N] -> [B, num_slots, N]
             attn_logits = torch.bmm(q, k.transpose(-1, -2)) / (self.slot_dim ** 0.5)
-            attn = F.softmax(attn_logits, dim=1)  # Softmax over slots (slots compete for each position)
 
-            # Weighted normalization across slots (ensures proper competition)
-            attn = attn + self.eps
-            attn = attn / attn.sum(dim=1, keepdim=True)
+            if self.hard_attention:
+                # Gumbel-Softmax for hard/binary attention
+                # Each position gets assigned to exactly one slot (approximately during training)
+                # Transpose to [B, N, num_slots] for gumbel_softmax (operates on last dim)
+                attn_logits_t = attn_logits.transpose(1, 2)  # [B, N, num_slots]
+                if self.training:
+                    # During training: use Gumbel-Softmax with straight-through estimator
+                    attn_t = F.gumbel_softmax(attn_logits_t, tau=self.gumbel_temperature, hard=True, dim=-1)
+                else:
+                    # During eval: use hard argmax
+                    attn_t = F.one_hot(attn_logits_t.argmax(dim=-1), num_classes=self.num_slots).float()
+                attn = attn_t.transpose(1, 2)  # Back to [B, num_slots, N]
+            else:
+                # Standard soft attention
+                attn = F.softmax(attn_logits, dim=1)  # Softmax over slots (slots compete for each position)
+
+                # Weighted normalization across slots (ensures proper competition)
+                attn = attn + self.eps
+                attn = attn / attn.sum(dim=1, keepdim=True)
 
             # Store attention from final iteration if requested
             if return_attn and iteration == self.num_iterations - 1:
@@ -131,6 +151,10 @@ class SlotAttention(nn.Module):
             return slots, attn_weights
         return slots
 
+    def set_gumbel_temperature(self, temperature):
+        """Set Gumbel-Softmax temperature (for annealing during training)."""
+        self.gumbel_temperature = temperature
+
 
 class SlotAttentionNoPos(nn.Module):
     """
@@ -138,14 +162,19 @@ class SlotAttentionNoPos(nn.Module):
 
     Used for non-spatial inputs like color-pooled features where the input
     is a set of feature vectors without spatial arrangement.
+
+    Supports optional hard/binary attention via Gumbel-Softmax for discrete slot assignment.
     """
-    def __init__(self, num_slots, slot_dim, feature_dim, num_iterations=3, hidden_dim=128, eps=1e-8):
+    def __init__(self, num_slots, slot_dim, feature_dim, num_iterations=3, hidden_dim=128, eps=1e-8,
+                 hard_attention=False, gumbel_temperature=1.0):
         super().__init__()
         self.num_slots = num_slots
         self.slot_dim = slot_dim
         self.feature_dim = feature_dim
         self.num_iterations = num_iterations
         self.eps = eps
+        self.hard_attention = hard_attention
+        self.gumbel_temperature = gumbel_temperature
 
         # Learned slot initialization parameters
         self.slots_mu = nn.Parameter(torch.randn(1, 1, slot_dim))
@@ -202,11 +231,23 @@ class SlotAttentionNoPos(nn.Module):
 
             # Compute attention weights
             attn_logits = torch.bmm(q, k.transpose(-1, -2)) / (self.slot_dim ** 0.5)
-            attn = F.softmax(attn_logits, dim=1)  # Softmax over slots
 
-            # Weighted normalization across slots
-            attn = attn + self.eps
-            attn = attn / attn.sum(dim=1, keepdim=True)
+            if self.hard_attention:
+                # Gumbel-Softmax for hard/binary attention
+                # Transpose to [B, N, num_slots] for gumbel_softmax (operates on last dim)
+                attn_logits_t = attn_logits.transpose(1, 2)  # [B, N, num_slots]
+                if self.training:
+                    attn_t = F.gumbel_softmax(attn_logits_t, tau=self.gumbel_temperature, hard=True, dim=-1)
+                else:
+                    attn_t = F.one_hot(attn_logits_t.argmax(dim=-1), num_classes=self.num_slots).float()
+                attn = attn_t.transpose(1, 2)  # Back to [B, num_slots, N]
+            else:
+                # Standard soft attention
+                attn = F.softmax(attn_logits, dim=1)  # Softmax over slots
+
+                # Weighted normalization across slots
+                attn = attn + self.eps
+                attn = attn / attn.sum(dim=1, keepdim=True)
 
             # Store attention from final iteration if requested
             if return_attn and iteration == self.num_iterations - 1:
@@ -228,6 +269,10 @@ class SlotAttentionNoPos(nn.Module):
         if return_attn:
             return slots, attn_weights
         return slots
+
+    def set_gumbel_temperature(self, temperature):
+        """Set Gumbel-Softmax temperature (for annealing during training)."""
+        self.gumbel_temperature = temperature
 
 
 class SlotDecoder(nn.Module):

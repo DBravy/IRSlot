@@ -432,6 +432,28 @@
                     <label class="form-label">Color Entropy Weight</label>
                     <input type="number" id="color_entropy_weight" class="form-input" value="0.1" step="0.01" min="0" max="1">
                 </div>
+
+                <div style="grid-column: 1 / -1; border-top: 1px solid #2a2a3e; padding-top: 15px; margin-top: 10px;">
+                    <h3 style="color: #667eea; margin-bottom: 15px; font-size: 1.1em;">Hard Attention (Gumbel-Softmax)</h3>
+                    <p style="color: #888; font-size: 0.85em; margin-bottom: 15px;">
+                        Enable binary/discrete slot assignment using Gumbel-Softmax. Each pixel is assigned to exactly one slot
+                        instead of soft attention weights. Lower temperature = harder assignment.
+                    </p>
+                </div>
+
+                <div>
+                    <label class="form-label">Enable Hard Attention</label>
+                    <div style="display: flex; align-items: center; gap: 10px; margin-top: 5px;">
+                        <input type="checkbox" id="hard_attention" style="width: 20px; height: 20px; cursor: pointer;">
+                        <span id="hard_attention_label" style="color: #888;">Off (soft attention)</span>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="form-label">Gumbel Temperature</label>
+                    <input type="number" id="gumbel_temperature" class="form-input" value="1.0" step="0.1" min="0.01" max="10">
+                    <span style="color: #666; font-size: 0.75em;">Lower = harder (0.1-1.0 recommended)</span>
+                </div>
             </form>
         </div>
         <div id="config-display" style="display: none;">
@@ -469,6 +491,10 @@
                 <div class="stat">
                     <div class="stat-label">Neg. Similarity</div>
                     <div class="stat-value" id="current-neg-sim">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Entropy Loss</div>
+                    <div class="stat-value" id="current-color-entropy">-</div>
                 </div>
             </div>
         </div>
@@ -547,7 +573,8 @@
             loss: [],
             accuracy: [],
             posSim: [],
-            negSim: []
+            negSim: [],
+            colorEntropy: []
         };
 
         // Configuration state tracking
@@ -600,6 +627,7 @@
                 const downsampledAccuracy = [];
                 const downsampledPosSim = [];
                 const downsampledNegSim = [];
+                const downsampledColorEntropy = [];
 
                 // Keep every other point from old data
                 for (let i = 0; i < oldDataLength; i += 2) {
@@ -608,6 +636,7 @@
                     downsampledAccuracy.push(trainingData.accuracy[i]);
                     downsampledPosSim.push(trainingData.posSim[i]);
                     downsampledNegSim.push(trainingData.negSim[i]);
+                    downsampledColorEntropy.push(trainingData.colorEntropy[i]);
                 }
 
                 // Keep all recent data
@@ -618,6 +647,7 @@
                     downsampledAccuracy.push(trainingData.accuracy[i]);
                     downsampledPosSim.push(trainingData.posSim[i]);
                     downsampledNegSim.push(trainingData.negSim[i]);
+                    downsampledColorEntropy.push(trainingData.colorEntropy[i]);
                 }
 
                 // Replace data
@@ -626,6 +656,7 @@
                 trainingData.accuracy = downsampledAccuracy;
                 trainingData.posSim = downsampledPosSim;
                 trainingData.negSim = downsampledNegSim;
+                trainingData.colorEntropy = downsampledColorEntropy;
 
                 console.log(`✓ Downsampled to ${trainingData.epochs.length} points`);
             }
@@ -661,6 +692,15 @@
                     yaxis: 'y2'
                 };
 
+                const entropyTrace = {
+                    x: trainingData.epochs,
+                    y: trainingData.colorEntropy,
+                    name: 'Entropy Loss',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#fbbf24', width: 2 }  // Yellow/amber color
+                };
+
                 // Use react for smooth updates (newPlot only on first init)
                 const lossAccLayout = {
                     paper_bgcolor: '#1a1a2e',
@@ -673,9 +713,9 @@
                 };
 
                 if (!chartsInitialized) {
-                    Plotly.newPlot('loss-accuracy-chart', [lossTrace, accuracyTrace], lossAccLayout);
+                    Plotly.newPlot('loss-accuracy-chart', [lossTrace, accuracyTrace, entropyTrace], lossAccLayout);
                 } else {
-                    Plotly.react('loss-accuracy-chart', [lossTrace, accuracyTrace], lossAccLayout);
+                    Plotly.react('loss-accuracy-chart', [lossTrace, accuracyTrace, entropyTrace], lossAccLayout);
                 }
 
                 const posSimTrace = {
@@ -719,7 +759,7 @@
         }
 
         // Extend charts with new data point (incremental update - much faster)
-        function extendCharts(x, loss, accuracy, posSim, negSim) {
+        function extendCharts(x, loss, accuracy, posSim, negSim, colorEntropy) {
             if (!chartsInitialized) {
                 // If charts aren't initialized yet, just update the full chart
                 updateCharts();
@@ -727,11 +767,11 @@
             }
 
             try {
-                // Extend both traces in loss-accuracy chart
+                // Extend all three traces in loss-accuracy chart (loss, accuracy, entropy)
                 Plotly.extendTraces('loss-accuracy-chart', {
-                    x: [[x], [x]],
-                    y: [[loss], [accuracy]]
-                }, [0, 1]);
+                    x: [[x], [x], [x]],
+                    y: [[loss], [accuracy], [colorEntropy]]
+                }, [0, 1, 2]);
 
                 // Extend both traces in similarity chart
                 Plotly.extendTraces('similarity-chart', {
@@ -766,7 +806,10 @@
                 checkpoint_dir: document.getElementById('checkpoint_dir').value,
                 save_every: parseInt(document.getElementById('save_every').value),
                 color_entropy_weight: parseFloat(document.getElementById('color_entropy_weight').value),
-                color_embed_dim: parseInt(document.getElementById('color_embed_dim').value)
+                color_embed_dim: parseInt(document.getElementById('color_embed_dim').value),
+                // Hard attention (Gumbel-Softmax) settings
+                hard_attention: document.getElementById('hard_attention').checked,
+                gumbel_temperature: parseFloat(document.getElementById('gumbel_temperature').value)
             };
 
             // Add max_puzzles if specified
@@ -1036,6 +1079,19 @@
         window.saveConfiguration = saveConfiguration;
         window.toggleAttentionViz = toggleAttentionViz;
 
+        // Update hard attention label based on checkbox state
+        function updateHardAttentionLabel() {
+            const checkbox = document.getElementById('hard_attention');
+            const label = document.getElementById('hard_attention_label');
+            if (checkbox.checked) {
+                label.textContent = 'On (Gumbel-Softmax)';
+                label.style.color = '#4ade80';
+            } else {
+                label.textContent = 'Off (soft attention)';
+                label.style.color = '#888';
+            }
+        }
+
         // Add event listeners to form inputs to track changes
         function setupFormChangeTracking() {
             const formInputs = document.querySelectorAll('#config-form input, #config-form select');
@@ -1046,6 +1102,13 @@
                 input.addEventListener('input', () => {
                     updateConfigStatus(false);
                 });
+            });
+
+            // Special handler for hard attention checkbox
+            const hardAttentionCheckbox = document.getElementById('hard_attention');
+            hardAttentionCheckbox.addEventListener('change', () => {
+                updateHardAttentionLabel();
+                updateConfigStatus(false);
             });
         }
 
@@ -1069,9 +1132,17 @@
                         Object.keys(data.config).forEach(key => {
                             const input = document.getElementById(key);
                             if (input) {
-                                input.value = data.config[key];
+                                // Handle checkbox specially
+                                if (input.type === 'checkbox') {
+                                    input.checked = data.config[key];
+                                } else {
+                                    input.value = data.config[key];
+                                }
                             }
                         });
+
+                        // Update hard attention label after loading
+                        updateHardAttentionLabel();
 
                         updateConfigStatus(configSaved);
                     }
@@ -1140,6 +1211,7 @@
             trainingData.accuracy = [];
             trainingData.posSim = [];
             trainingData.negSim = [];
+            trainingData.colorEntropy = [];
             chartsInitialized = false;
 
             console.log('📊 Chart data cleared. Waiting for batch history or updates...');
@@ -1157,6 +1229,7 @@
             trainingData.accuracy = history.accuracy.slice();
             trainingData.posSim = history.pos_sim.slice();
             trainingData.negSim = history.neg_sim.slice();
+            trainingData.colorEntropy = (history.color_entropy || []).slice();
 
             console.log(`📊 Chart data populated with ${trainingData.epochs.length} historical points`);
             if (trainingData.epochs.length > 0) {
@@ -1189,12 +1262,14 @@
             const accuracy = data.accuracy || 0;
             const posSim = data.avg_positive_sim || 0;
             const negSim = data.avg_negative_sim || 0;
+            const colorEntropy = data.color_entropy || 0;
 
             trainingData.epochs.push(step);
             trainingData.loss.push(loss);
             trainingData.accuracy.push(accuracy);
             trainingData.posSim.push(posSim);
             trainingData.negSim.push(negSim);
+            trainingData.colorEntropy.push(colorEntropy);
 
             console.log(`📊 Chart data point added: step=${step}, arrays length=${trainingData.epochs.length}`);
 
@@ -1203,6 +1278,10 @@
             document.getElementById('current-accuracy').textContent = (accuracy * 100).toFixed(2) + '%';
             document.getElementById('current-pos-sim').textContent = posSim.toFixed(4);
             document.getElementById('current-neg-sim').textContent = negSim.toFixed(4);
+
+            // Entropy loss contribution = weight × raw_entropy (lower is better)
+            const entropyLoss = data.color_entropy || 0;
+            document.getElementById('current-color-entropy').textContent = entropyLoss.toFixed(4);
 
             // Update progress within epoch
             const epochProgress = totalEpochs > 0
@@ -1214,7 +1293,7 @@
             document.getElementById('progress-fill').textContent = `${epochProgress.toFixed(1)}%`;
 
             // Use incremental chart update for better performance
-            extendCharts(step, loss, accuracy, posSim, negSim);
+            extendCharts(step, loss, accuracy, posSim, negSim, colorEntropy);
 
             // Downsample if we have too many points
             if (trainingData.epochs.length > MAX_DATA_POINTS) {
@@ -1239,6 +1318,7 @@
                 trainingData.accuracy = [];
                 trainingData.posSim = [];
                 trainingData.negSim = [];
+                trainingData.colorEntropy = [];
                 chartsInitialized = false;
 
                 // Clear the charts visually
