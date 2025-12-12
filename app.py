@@ -24,7 +24,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO
 from torch.utils.data import DataLoader
 
-from model import SlotInstanceModel, HierarchicalSlotModel, ColorAwareSpatialSlotModel
+from model import SlotInstanceModel, HierarchicalSlotModel, ColorAwareSpatialSlotModel, CNNBaselineModel
 from memory_bank import MemoryBank
 from loss import InfoNCELoss, ColorEntropyLoss
 from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
@@ -357,8 +357,10 @@ def initialize_training(config):
 
     # Load dataset
     puzzle_filter = config.get('puzzle_filter', None)
+    grid_type = config.get('grid_type', 'both')
     if puzzle_filter:
         print(f"Loading single puzzle '{puzzle_filter}' from raw JSON...")
+        print(f"  Grid type: {grid_type}")
     else:
         print(f"Loading dataset from {config['data_dir']}...")
 
@@ -372,7 +374,8 @@ def initialize_training(config):
         puzzle_filter=puzzle_filter,
         arc_version=config.get('arc_version', None),
         num_augmentations=config.get('num_augmentations', 200),
-        raw_data_dir='kaggle/combined'
+        raw_data_dir='kaggle/combined',
+        grid_type=config.get('grid_type', 'both')
     )
 
     # Validate that we have enough puzzles for the number of negative samples
@@ -457,6 +460,14 @@ def initialize_training(config):
             max_grid_size=30,
             hard_attention=hard_attention,
             gumbel_temperature=gumbel_temperature
+        ).to(device)
+    elif model_type == 'baseline':
+        print(f"  Using CNNBaselineModel (no slot attention)")
+        model = CNNBaselineModel(
+            num_colors=10,
+            encoder_feature_dim=config['encoder_feature_dim'],
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            embedding_dim=config['embedding_dim']
         ).to(device)
     else:
         print(f"  Using SlotInstanceModel (standard)")
@@ -548,6 +559,10 @@ def initialize_training(config):
     # Add max_puzzles if it was specified
     if 'max_puzzles' in config:
         state_config['max_puzzles'] = config['max_puzzles']
+
+    # Add grid_type if using single puzzle mode
+    if puzzle_filter and 'grid_type' in config:
+        state_config['grid_type'] = config['grid_type']
 
     # Add color_embed_lr if it was specified
     if color_embed_lr is not None:

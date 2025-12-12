@@ -340,6 +340,7 @@
                         <option value="standard">Standard (learned slot attention on pixels)</option>
                         <option value="hierarchical">Hierarchical (hard-coded color segmentation)</option>
                         <option value="color_aware" selected>Color-Aware Spatial (learned color embeddings + spatial attention)</option>
+                        <option value="baseline">CNN Baseline (no slot attention)</option>
                     </select>
                 </div>
 
@@ -450,6 +451,18 @@
                     <input type="number" id="num_augmentations" class="form-input" value="200">
                     <span style="color: #666; font-size: 0.75em;">
                         Augmentations per puzzle
+                    </span>
+                </div>
+
+                <div>
+                    <label class="form-label">Grid Type</label>
+                    <select id="grid_type" class="form-input">
+                        <option value="both" selected>Both (inputs + outputs)</option>
+                        <option value="input">Input grids only</option>
+                        <option value="output">Output grids only</option>
+                    </select>
+                    <span style="color: #666; font-size: 0.75em;">
+                        Which grids to use from puzzle
                     </span>
                 </div>
 
@@ -864,6 +877,7 @@
                 config.puzzle_filter = puzzleFilter.trim();
                 config.arc_version = parseInt(document.getElementById('arc_version').value);
                 config.num_augmentations = parseInt(document.getElementById('num_augmentations').value);
+                config.grid_type = document.getElementById('grid_type').value;
             }
 
             // Add color_embed_lr if specified (otherwise uses main lr)

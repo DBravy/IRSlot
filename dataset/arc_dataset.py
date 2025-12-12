@@ -50,7 +50,7 @@ class ARCInstanceDataset(Dataset):
     """
     def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30,
                  max_puzzles=None, puzzle_filter=None, arc_version=None, num_augmentations=200,
-                 raw_data_dir='kaggle/combined'):
+                 raw_data_dir='kaggle/combined', grid_type='both'):
         """
         Args:
             data_dir: Root directory containing the processed dataset (used when puzzle_filter is None)
@@ -63,16 +63,18 @@ class ARCInstanceDataset(Dataset):
             arc_version: ARC version (1 or 2) - required when puzzle_filter is specified
             num_augmentations: Number of augmentations to generate when using puzzle_filter
             raw_data_dir: Directory containing raw ARC JSON files
+            grid_type: Which grids to use for single puzzle mode: 'input', 'output', or 'both' (default)
         """
         self.data_dir = data_dir
         self.split = split
         self.subset = subset
         self.max_grid_size = max_grid_size
         self.puzzle_filter = puzzle_filter
+        self.grid_type = grid_type
 
         if puzzle_filter is not None:
             # Load from raw JSON and generate augmentations on-the-fly
-            self._load_from_raw_json(puzzle_filter, arc_version, num_augmentations, raw_data_dir)
+            self._load_from_raw_json(puzzle_filter, arc_version, num_augmentations, raw_data_dir, grid_type)
         else:
             # Load from preprocessed dataset
             self._load_from_preprocessed(data_dir, split, subset, max_puzzles)
@@ -91,12 +93,25 @@ class ARCInstanceDataset(Dataset):
         print(f"  Total examples: {len(self.inputs)}")
         print(f"  Total unique grids: {len(self.puzzle_identifiers)}")
 
-    def _load_from_raw_json(self, puzzle_id, arc_version, num_augmentations, raw_data_dir):
-        """Load a specific puzzle from raw JSON and generate augmentations."""
+    def _load_from_raw_json(self, puzzle_id, arc_version, num_augmentations, raw_data_dir, grid_type='both'):
+        """Load a specific puzzle from raw JSON and generate augmentations.
+
+        Args:
+            puzzle_id: The puzzle ID to load
+            arc_version: ARC version (1 or 2)
+            num_augmentations: Number of augmentations to generate
+            raw_data_dir: Directory containing raw ARC JSON files
+            grid_type: Which grids to use: 'input', 'output', or 'both' (default)
+        """
         if arc_version is None:
             raise ValueError("arc_version must be specified when using puzzle_filter")
 
+        if grid_type not in ('input', 'output', 'both'):
+            raise ValueError(f"grid_type must be 'input', 'output', or 'both', got '{grid_type}'")
+
+        grid_type_desc = {'input': 'input grids only', 'output': 'output grids only', 'both': 'input and output grids'}[grid_type]
         print(f"Loading puzzle '{puzzle_id}' from raw JSON (ARC version {arc_version})")
+        print(f"  Grid type: {grid_type_desc}")
         print(f"  Generating {num_augmentations} augmentations...")
 
         # Determine which JSON files to search
@@ -146,15 +161,18 @@ class ARCInstanceDataset(Dataset):
         if puzzle_data is None:
             raise ValueError(f"Puzzle '{puzzle_id}' not found in ARC version {arc_version} files")
 
-        # Extract all grids from the puzzle (inputs and outputs)
+        # Extract grids from the puzzle based on grid_type
         base_grids = []
         for example in puzzle_data.get('train', []):
-            base_grids.append(np.array(example['input'], dtype=np.uint8))
-            base_grids.append(np.array(example['output'], dtype=np.uint8))
+            if grid_type in ('input', 'both'):
+                base_grids.append(np.array(example['input'], dtype=np.uint8))
+            if grid_type in ('output', 'both'):
+                base_grids.append(np.array(example['output'], dtype=np.uint8))
         for i, example in enumerate(puzzle_data.get('test', [])):
-            base_grids.append(np.array(example['input'], dtype=np.uint8))
+            if grid_type in ('input', 'both'):
+                base_grids.append(np.array(example['input'], dtype=np.uint8))
             # Add test output if we have solutions
-            if solutions and i < len(solutions):
+            if grid_type in ('output', 'both') and solutions and i < len(solutions):
                 base_grids.append(np.array(solutions[i], dtype=np.uint8))
 
         print(f"  Found {len(base_grids)} base grids in puzzle")
@@ -227,6 +245,7 @@ class ARCInstanceDataset(Dataset):
         self.metadata = {
             'puzzle_filter': puzzle_id,
             'arc_version': arc_version,
+            'grid_type': grid_type,
             'num_variants': num_variants,
             'num_base_grids': len(base_grids),
             'num_unique_grids': num_unique_grids

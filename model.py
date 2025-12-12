@@ -499,3 +499,75 @@ class ColorAwareSpatialSlotModel(nn.Module):
         """Convenience method to get just slots."""
         _, slots = self.forward(grids)
         return slots
+
+
+class CNNBaselineModel(nn.Module):
+    """
+    CNN-only baseline without slot attention bottleneck.
+
+    Architecture:
+    1. Grid Encoder: Converts grid to per-pixel feature maps
+    2. Global Average Pooling: Aggregates spatial features
+    3. Projection: Projects to embedding space for contrastive learning
+
+    This serves as a baseline to measure slot attention's contribution.
+    """
+    def __init__(
+        self,
+        num_colors=10,
+        encoder_feature_dim=64,
+        encoder_hidden_dim=128,
+        embedding_dim=128
+    ):
+        super().__init__()
+        self.num_colors = num_colors
+        self.embedding_dim = embedding_dim
+
+        # Encoder: Grid -> Per-pixel features
+        self.encoder = ARCGridEncoder(
+            num_colors=num_colors,
+            feature_dim=encoder_feature_dim,
+            hidden_dim=encoder_hidden_dim
+        )
+
+        # Projection head: Pooled features -> Embedding
+        self.projection_head = nn.Sequential(
+            nn.Linear(encoder_feature_dim, encoder_feature_dim),
+            nn.ReLU(),
+            nn.Linear(encoder_feature_dim, embedding_dim)
+        )
+
+    def forward(self, grids, return_attn=False):
+        """
+        Forward pass.
+
+        Args:
+            grids: [B, H, W] - Input grids with integer values 0-9
+            return_attn: Ignored (for API compatibility), always returns None for attn
+
+        Returns:
+            embeddings: [B, embedding_dim] - Final embeddings for contrastive learning
+            pooled: [B, 1, encoder_feature_dim] - Pooled features (analogous to slots)
+        """
+        # Encode grids to per-pixel features
+        # [B, H*W, feature_dim]
+        features = self.encoder(grids)
+
+        # Global average pooling over spatial dimension
+        # [B, feature_dim]
+        pooled = features.mean(dim=1)
+
+        # Project to embedding space
+        embeddings = self.projection_head(pooled)
+
+        # Normalize embeddings for contrastive learning
+        embeddings = F.normalize(embeddings, dim=1)
+
+        if return_attn:
+            return embeddings, pooled.unsqueeze(1), None
+        return embeddings, pooled.unsqueeze(1)
+
+    def get_embeddings(self, grids):
+        """Convenience method to get just embeddings."""
+        embeddings, _ = self.forward(grids)
+        return embeddings
