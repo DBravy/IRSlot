@@ -18,7 +18,7 @@ class ARCInstanceDataset(Dataset):
     - grid: Augmented view of the grid [H, W]
     - original_shape: (H, W) before padding
     """
-    def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30, max_puzzles=None):
+    def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30, max_puzzles=None, puzzle_filter=None):
         """
         Args:
             data_dir: Root directory containing the processed dataset
@@ -27,6 +27,7 @@ class ARCInstanceDataset(Dataset):
             augment: Whether to apply augmentations
             max_grid_size: Maximum grid dimension (default 30 for ARC)
             max_puzzles: Maximum number of unique puzzles to load (None = all)
+            puzzle_filter: If specified, only load grids from this puzzle (base + augmentations)
         """
         self.data_dir = data_dir
         self.split = split
@@ -44,6 +45,61 @@ class ARCInstanceDataset(Dataset):
         self.labels = np.load(f"{subset_path}labels.npy")
         self.puzzle_identifiers = np.load(f"{subset_path}puzzle_identifiers.npy")
         self.puzzle_indices = np.load(f"{subset_path}puzzle_indices.npy")
+
+        # Filter to specific puzzle if puzzle_filter is specified
+        if puzzle_filter is not None:
+            print(f"Filtering dataset to puzzle: {puzzle_filter}")
+
+            # Load identifiers.json (list where index = int ID)
+            identifiers_path = os.path.join(data_dir, 'identifiers.json')
+            with open(identifiers_path, 'r') as f:
+                identifiers = json.load(f)
+
+            # Find matching int IDs (base puzzle + all augmented variants)
+            matching_int_ids = set()
+            for int_id, str_id in enumerate(identifiers):
+                if str_id == puzzle_filter or str_id.startswith(puzzle_filter + '|||'):
+                    matching_int_ids.add(int_id)
+
+            if not matching_int_ids:
+                raise ValueError(f"No puzzle variants found for puzzle_filter: {puzzle_filter}")
+
+            print(f"  Found {len(matching_int_ids)} puzzle variants (base + augmented)")
+
+            # Find which puzzle indices in our dataset match these IDs
+            matching_mask = np.isin(self.puzzle_identifiers, list(matching_int_ids))
+            matching_puzzle_indices = np.where(matching_mask)[0]
+
+            if len(matching_puzzle_indices) == 0:
+                raise ValueError(f"No puzzles in {split} dataset match puzzle_filter: {puzzle_filter}")
+
+            # Collect all grid indices for matching puzzles
+            grid_indices = []
+            for puzzle_idx in matching_puzzle_indices:
+                start = self.puzzle_indices[puzzle_idx]
+                end = self.puzzle_indices[puzzle_idx + 1] if puzzle_idx + 1 < len(self.puzzle_indices) else len(self.inputs)
+                grid_indices.extend(range(start, end))
+
+            grid_indices = np.array(grid_indices)
+            print(f"  Found {len(matching_puzzle_indices)} puzzle variants in {split} dataset")
+            print(f"  Total grids after filtering: {len(grid_indices)}")
+
+            # Filter inputs and labels
+            self.inputs = self.inputs[grid_indices]
+            self.labels = self.labels[grid_indices]
+
+            # Remap puzzle_identifiers to contiguous 0 to N-1 for memory bank compatibility
+            unique_matching = sorted(matching_int_ids)
+            self.puzzle_identifiers = np.arange(len(matching_puzzle_indices), dtype=self.puzzle_identifiers.dtype)
+
+            # Rebuild puzzle_indices for the filtered data
+            new_indices = [0]
+            for puzzle_idx in matching_puzzle_indices:
+                start = self.puzzle_indices[puzzle_idx]
+                end = self.puzzle_indices[puzzle_idx + 1] if puzzle_idx + 1 < len(self.puzzle_indices) else len(self.inputs) + grid_indices[0]
+                num_grids = end - start
+                new_indices.append(new_indices[-1] + num_grids)
+            self.puzzle_indices = np.array(new_indices, dtype=np.int32)
 
         # Limit to max_puzzles if specified
         if max_puzzles is not None and max_puzzles < len(self.puzzle_identifiers):

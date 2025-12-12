@@ -420,6 +420,14 @@
                 </div>
 
                 <div>
+                    <label class="form-label">Puzzle Filter (optional)</label>
+                    <input type="text" id="puzzle_filter" class="form-input" placeholder="e.g., 23b5c85d">
+                    <span style="color: #666; font-size: 0.75em;">
+                        Train on single puzzle + augmentations only
+                    </span>
+                </div>
+
+                <div>
                     <label class="form-label">Batch Log Interval</label>
                     <input type="number" id="batch_log_interval" class="form-input" value="10">
                 </div>
@@ -436,7 +444,7 @@
 
                 <div>
                     <label class="form-label">Color Entropy Weight</label>
-                    <input type="number" id="color_entropy_weight" class="form-input" value="0.1" step="0.01" min="0" max="1">
+                    <input type="number" id="color_entropy_weight" class="form-input" value="10.0" step="0.01" min="0" max="1">
                 </div>
 
                 <div style="grid-column: 1 / -1; border-top: 1px solid #2a2a3e; padding-top: 15px; margin-top: 10px;">
@@ -822,6 +830,12 @@
             const maxPuzzles = document.getElementById('max_puzzles').value;
             if (maxPuzzles && maxPuzzles.trim() !== '') {
                 config.max_puzzles = parseInt(maxPuzzles);
+            }
+
+            // Add puzzle_filter if specified
+            const puzzleFilter = document.getElementById('puzzle_filter').value;
+            if (puzzleFilter && puzzleFilter.trim() !== '') {
+                config.puzzle_filter = puzzleFilter.trim();
             }
 
             // Add color_embed_lr if specified (otherwise uses main lr)

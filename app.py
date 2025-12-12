@@ -363,7 +363,8 @@ def initialize_training(config):
         subset=config.get('subset', 'all'),
         augment=True,
         max_grid_size=30,
-        max_puzzles=config.get('max_puzzles', None)
+        max_puzzles=config.get('max_puzzles', None),
+        puzzle_filter=config.get('puzzle_filter', None)
     )
 
     # Validate that we have enough puzzles for the number of negative samples
@@ -376,15 +377,26 @@ def initialize_training(config):
     min_required_grids = num_negatives + batch_size
 
     if num_unique_grids < min_required_grids:
-        raise ValueError(
+        error_msg = (
             f"Number of unique puzzles ({num_unique_grids}) must be at least "
             f"num_negatives + batch_size = {num_negatives} + {batch_size} = {min_required_grids}. "
             f"This ensures there are enough grids to sample negatives from after excluding the batch. "
-            f"Please either:\n"
-            f"  - Increase max_puzzles to at least {min_required_grids}\n"
-            f"  - Decrease num_negatives (currently {num_negatives})\n"
-            f"  - Decrease batch_size (currently {batch_size})"
         )
+        if config.get('puzzle_filter'):
+            error_msg += (
+                f"\n\nYou are filtering to puzzle '{config['puzzle_filter']}' which only has "
+                f"{num_unique_grids} variants. Consider:\n"
+                f"  - Reducing num_negatives to at most {num_unique_grids - batch_size} (currently {num_negatives})\n"
+                f"  - Reducing batch_size (currently {batch_size})"
+            )
+        else:
+            error_msg += (
+                f"Please either:\n"
+                f"  - Increase max_puzzles to at least {min_required_grids}\n"
+                f"  - Decrease num_negatives (currently {num_negatives})\n"
+                f"  - Decrease batch_size (currently {batch_size})"
+            )
+        raise ValueError(error_msg)
 
     print(f"✓ Validation passed: {num_unique_grids} puzzles >= {num_negatives} negatives + {batch_size} batch_size")
 
