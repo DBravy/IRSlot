@@ -356,7 +356,12 @@ def initialize_training(config):
     device = config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load dataset
-    print(f"Loading dataset from {config['data_dir']}...")
+    puzzle_filter = config.get('puzzle_filter', None)
+    if puzzle_filter:
+        print(f"Loading single puzzle '{puzzle_filter}' from raw JSON...")
+    else:
+        print(f"Loading dataset from {config['data_dir']}...")
+
     dataset = ARCInstanceDataset(
         data_dir=config['data_dir'],
         split=config.get('split', 'train'),
@@ -364,7 +369,10 @@ def initialize_training(config):
         augment=True,
         max_grid_size=30,
         max_puzzles=config.get('max_puzzles', None),
-        puzzle_filter=config.get('puzzle_filter', None)
+        puzzle_filter=puzzle_filter,
+        arc_version=config.get('arc_version', None),
+        num_augmentations=config.get('num_augmentations', 200),
+        raw_data_dir='kaggle/combined'
     )
 
     # Validate that we have enough puzzles for the number of negative samples
@@ -384,8 +392,9 @@ def initialize_training(config):
         )
         if config.get('puzzle_filter'):
             error_msg += (
-                f"\n\nYou are filtering to puzzle '{config['puzzle_filter']}' which only has "
+                f"\n\nYou are filtering to puzzle '{config['puzzle_filter']}' which generated "
                 f"{num_unique_grids} variants. Consider:\n"
+                f"  - Increasing num_augmentations (currently {config.get('num_augmentations', 200)})\n"
                 f"  - Reducing num_negatives to at most {num_unique_grids - batch_size} (currently {num_negatives})\n"
                 f"  - Reducing batch_size (currently {batch_size})"
             )

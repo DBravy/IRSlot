@@ -3,10 +3,40 @@ Dataset loader for ARC grids for instance recognition training.
 """
 import os
 import json
+import hashlib
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from augmentation import ARCGridAugmentation
+from dataset.common import dihedral_transform
+
+
+# Constants for grid encoding
+ARCMaxGridSize = 30
+PuzzleIdSeparator = "|||"
+
+
+def grid_hash(grid: np.ndarray):
+    """Hash a grid for duplicate checking."""
+    buffer = [x.to_bytes(1, byteorder='big') for x in grid.shape]
+    buffer.append(grid.tobytes())
+    return hashlib.sha256(b"".join(buffer)).hexdigest()
+
+
+def generate_augmentation():
+    """Generate a random augmentation (dihedral transform + color permutation)."""
+    trans_id = np.random.randint(0, 8)
+    # Permute colors, excluding "0" (black)
+    mapping = np.concatenate([
+        np.arange(0, 1, dtype=np.uint8),
+        np.random.permutation(np.arange(1, 10, dtype=np.uint8))
+    ])
+    return trans_id, mapping
+
+
+def apply_augmentation(grid: np.ndarray, trans_id: int, color_mapping: np.ndarray):
+    """Apply augmentation to a grid."""
+    return dihedral_transform(color_mapping[grid], trans_id)
 
 
 class ARCInstanceDataset(Dataset):
@@ -18,22 +48,192 @@ class ARCInstanceDataset(Dataset):
     - grid: Augmented view of the grid [H, W]
     - original_shape: (H, W) before padding
     """
-    def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30, max_puzzles=None, puzzle_filter=None):
+    def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30,
+                 max_puzzles=None, puzzle_filter=None, arc_version=None, num_augmentations=200,
+                 raw_data_dir='kaggle/combined'):
         """
         Args:
-            data_dir: Root directory containing the processed dataset
+            data_dir: Root directory containing the processed dataset (used when puzzle_filter is None)
             split: 'train' or 'test'
             subset: 'all' (default subset name from build_arc_dataset.py)
-            augment: Whether to apply augmentations
+            augment: Whether to apply runtime augmentations
             max_grid_size: Maximum grid dimension (default 30 for ARC)
             max_puzzles: Maximum number of unique puzzles to load (None = all)
-            puzzle_filter: If specified, only load grids from this puzzle (base + augmentations)
+            puzzle_filter: If specified, only load grids from this puzzle (loads from raw JSON)
+            arc_version: ARC version (1 or 2) - required when puzzle_filter is specified
+            num_augmentations: Number of augmentations to generate when using puzzle_filter
+            raw_data_dir: Directory containing raw ARC JSON files
         """
         self.data_dir = data_dir
         self.split = split
         self.subset = subset
         self.max_grid_size = max_grid_size
+        self.puzzle_filter = puzzle_filter
 
+        if puzzle_filter is not None:
+            # Load from raw JSON and generate augmentations on-the-fly
+            self._load_from_raw_json(puzzle_filter, arc_version, num_augmentations, raw_data_dir)
+        else:
+            # Load from preprocessed dataset
+            self._load_from_preprocessed(data_dir, split, subset, max_puzzles)
+
+        # Setup runtime augmentation
+        self.augment = augment
+        if augment:
+            self.augmentation = ARCGridAugmentation(
+                apply_rotation=True,
+                apply_color_permutation=False
+            )
+        else:
+            self.augmentation = None
+
+        print(f"Loaded dataset:")
+        print(f"  Total examples: {len(self.inputs)}")
+        print(f"  Total unique grids: {len(self.puzzle_identifiers)}")
+
+    def _load_from_raw_json(self, puzzle_id, arc_version, num_augmentations, raw_data_dir):
+        """Load a specific puzzle from raw JSON and generate augmentations."""
+        if arc_version is None:
+            raise ValueError("arc_version must be specified when using puzzle_filter")
+
+        print(f"Loading puzzle '{puzzle_id}' from raw JSON (ARC version {arc_version})")
+        print(f"  Generating {num_augmentations} augmentations...")
+
+        # Determine which JSON files to search
+        if arc_version == 1:
+            challenge_files = [
+                os.path.join(raw_data_dir, 'arc-agi_training_challenges.json'),
+                os.path.join(raw_data_dir, 'arc-agi_evaluation_challenges.json'),
+            ]
+            solution_files = [
+                os.path.join(raw_data_dir, 'arc-agi_training_solutions.json'),
+                os.path.join(raw_data_dir, 'arc-agi_evaluation_solutions.json'),
+            ]
+        elif arc_version == 2:
+            challenge_files = [
+                os.path.join(raw_data_dir, 'arc-agi_training_challenges.json'),
+                os.path.join(raw_data_dir, 'arc-agi_training2_challenges.json'),
+                os.path.join(raw_data_dir, 'arc-agi_evaluation_challenges.json'),
+                os.path.join(raw_data_dir, 'arc-agi_evaluation2_challenges.json'),
+            ]
+            solution_files = [
+                os.path.join(raw_data_dir, 'arc-agi_training_solutions.json'),
+                os.path.join(raw_data_dir, 'arc-agi_training2_solutions.json'),
+                os.path.join(raw_data_dir, 'arc-agi_evaluation_solutions.json'),
+                os.path.join(raw_data_dir, 'arc-agi_evaluation2_solutions.json'),
+            ]
+        else:
+            raise ValueError(f"arc_version must be 1 or 2, got {arc_version}")
+
+        # Find the puzzle in the JSON files
+        puzzle_data = None
+        solutions = None
+        for challenge_file, solution_file in zip(challenge_files, solution_files):
+            if not os.path.exists(challenge_file):
+                continue
+            with open(challenge_file, 'r') as f:
+                challenges = json.load(f)
+            if puzzle_id in challenges:
+                puzzle_data = challenges[puzzle_id]
+                # Try to load solutions
+                if os.path.exists(solution_file):
+                    with open(solution_file, 'r') as f:
+                        all_solutions = json.load(f)
+                    if puzzle_id in all_solutions:
+                        solutions = all_solutions[puzzle_id]
+                break
+
+        if puzzle_data is None:
+            raise ValueError(f"Puzzle '{puzzle_id}' not found in ARC version {arc_version} files")
+
+        # Extract all grids from the puzzle (inputs and outputs)
+        base_grids = []
+        for example in puzzle_data.get('train', []):
+            base_grids.append(np.array(example['input'], dtype=np.uint8))
+            base_grids.append(np.array(example['output'], dtype=np.uint8))
+        for i, example in enumerate(puzzle_data.get('test', [])):
+            base_grids.append(np.array(example['input'], dtype=np.uint8))
+            # Add test output if we have solutions
+            if solutions and i < len(solutions):
+                base_grids.append(np.array(solutions[i], dtype=np.uint8))
+
+        print(f"  Found {len(base_grids)} base grids in puzzle")
+
+        # Generate augmentations
+        all_grids = []  # List of (grid, puzzle_variant_id)
+        seen_hashes = set()
+
+        # Add base puzzle grids (variant 0)
+        for grid in base_grids:
+            h = grid_hash(grid)
+            if h not in seen_hashes:
+                seen_hashes.add(h)
+                all_grids.append((grid, 0))
+
+        # Generate augmented variants
+        num_variants = 1  # Already have base
+        max_attempts = num_augmentations * 5  # Allow retries for duplicates
+
+        for _ in range(max_attempts):
+            if num_variants >= num_augmentations + 1:
+                break
+
+            trans_id, color_mapping = generate_augmentation()
+
+            # Check if this augmentation produces a new variant
+            aug_grids = [apply_augmentation(g, trans_id, color_mapping) for g in base_grids]
+            variant_hash = hashlib.sha256(
+                '|'.join(grid_hash(g) for g in aug_grids).encode()
+            ).hexdigest()
+
+            if variant_hash not in seen_hashes:
+                seen_hashes.add(variant_hash)
+                for grid in aug_grids:
+                    all_grids.append((grid, num_variants))
+                num_variants += 1
+
+        print(f"  Generated {num_variants} puzzle variants")
+        print(f"  Total grids: {len(all_grids)}")
+
+        # Convert to the format expected by the rest of the class
+        # Each grid gets its own unique ID (not grouped by variant)
+        self.inputs = []
+        self.labels = []
+        grid_ids = []
+
+        for grid, variant_id in all_grids:
+            # Encode grid: pad to max_grid_size, add 2 to colors
+            encoded = np.zeros((self.max_grid_size, self.max_grid_size), dtype=np.uint8)
+            h, w = grid.shape
+            encoded[:h, :w] = grid + 2  # Shift colors by 2 (0=pad, 1=eos, 2-11=colors)
+            self.inputs.append(encoded.flatten())
+            self.labels.append(encoded.flatten())  # Same as input for this task
+            grid_ids.append(len(grid_ids))  # Each grid gets unique ID
+
+        self.inputs = np.array(self.inputs, dtype=np.uint8)
+        self.labels = np.array(self.labels, dtype=np.uint8)
+
+        num_unique_grids = len(grid_ids)
+
+        # Create puzzle_identifiers (one per unique grid)
+        self.puzzle_identifiers = np.arange(num_unique_grids, dtype=np.int32)
+
+        # Create puzzle_indices (for compatibility) - each grid is its own "puzzle"
+        self.puzzle_indices = np.arange(num_unique_grids + 1, dtype=np.int32)
+
+        # Store grid-to-puzzle mapping (each grid maps to itself)
+        self._grid_puzzle_ids = np.array(grid_ids, dtype=np.int32)
+
+        self.metadata = {
+            'puzzle_filter': puzzle_id,
+            'arc_version': arc_version,
+            'num_variants': num_variants,
+            'num_base_grids': len(base_grids),
+            'num_unique_grids': num_unique_grids
+        }
+
+    def _load_from_preprocessed(self, data_dir, split, subset, max_puzzles):
+        """Load from preprocessed numpy files."""
         # Load metadata
         metadata_path = os.path.join(data_dir, split, 'dataset.json')
         with open(metadata_path, 'r') as f:
@@ -45,61 +245,7 @@ class ARCInstanceDataset(Dataset):
         self.labels = np.load(f"{subset_path}labels.npy")
         self.puzzle_identifiers = np.load(f"{subset_path}puzzle_identifiers.npy")
         self.puzzle_indices = np.load(f"{subset_path}puzzle_indices.npy")
-
-        # Filter to specific puzzle if puzzle_filter is specified
-        if puzzle_filter is not None:
-            print(f"Filtering dataset to puzzle: {puzzle_filter}")
-
-            # Load identifiers.json (list where index = int ID)
-            identifiers_path = os.path.join(data_dir, 'identifiers.json')
-            with open(identifiers_path, 'r') as f:
-                identifiers = json.load(f)
-
-            # Find matching int IDs (base puzzle + all augmented variants)
-            matching_int_ids = set()
-            for int_id, str_id in enumerate(identifiers):
-                if str_id == puzzle_filter or str_id.startswith(puzzle_filter + '|||'):
-                    matching_int_ids.add(int_id)
-
-            if not matching_int_ids:
-                raise ValueError(f"No puzzle variants found for puzzle_filter: {puzzle_filter}")
-
-            print(f"  Found {len(matching_int_ids)} puzzle variants (base + augmented)")
-
-            # Find which puzzle indices in our dataset match these IDs
-            matching_mask = np.isin(self.puzzle_identifiers, list(matching_int_ids))
-            matching_puzzle_indices = np.where(matching_mask)[0]
-
-            if len(matching_puzzle_indices) == 0:
-                raise ValueError(f"No puzzles in {split} dataset match puzzle_filter: {puzzle_filter}")
-
-            # Collect all grid indices for matching puzzles
-            grid_indices = []
-            for puzzle_idx in matching_puzzle_indices:
-                start = self.puzzle_indices[puzzle_idx]
-                end = self.puzzle_indices[puzzle_idx + 1] if puzzle_idx + 1 < len(self.puzzle_indices) else len(self.inputs)
-                grid_indices.extend(range(start, end))
-
-            grid_indices = np.array(grid_indices)
-            print(f"  Found {len(matching_puzzle_indices)} puzzle variants in {split} dataset")
-            print(f"  Total grids after filtering: {len(grid_indices)}")
-
-            # Filter inputs and labels
-            self.inputs = self.inputs[grid_indices]
-            self.labels = self.labels[grid_indices]
-
-            # Remap puzzle_identifiers to contiguous 0 to N-1 for memory bank compatibility
-            unique_matching = sorted(matching_int_ids)
-            self.puzzle_identifiers = np.arange(len(matching_puzzle_indices), dtype=self.puzzle_identifiers.dtype)
-
-            # Rebuild puzzle_indices for the filtered data
-            new_indices = [0]
-            for puzzle_idx in matching_puzzle_indices:
-                start = self.puzzle_indices[puzzle_idx]
-                end = self.puzzle_indices[puzzle_idx + 1] if puzzle_idx + 1 < len(self.puzzle_indices) else len(self.inputs) + grid_indices[0]
-                num_grids = end - start
-                new_indices.append(new_indices[-1] + num_grids)
-            self.puzzle_indices = np.array(new_indices, dtype=np.int32)
+        self._grid_puzzle_ids = None  # Will use puzzle_indices for lookup
 
         # Limit to max_puzzles if specified
         if max_puzzles is not None and max_puzzles < len(self.puzzle_identifiers):
@@ -108,15 +254,13 @@ class ARCInstanceDataset(Dataset):
             # Keep only the first max_puzzles
             old_puzzle_ids = self.puzzle_identifiers[:max_puzzles]
 
-            # Create a mapping from old puzzle IDs to new sequential IDs (0, 1, 2, ..., max_puzzles-1)
+            # Create a mapping from old puzzle IDs to new sequential IDs
             self.id_mapping = {old_id: new_id for new_id, old_id in enumerate(old_puzzle_ids)}
 
             # Update puzzle_identifiers to be sequential
             self.puzzle_identifiers = np.arange(max_puzzles, dtype=self.puzzle_identifiers.dtype)
 
             # Find the index range that corresponds to these puzzles
-            # puzzle_indices[i] is the starting index for puzzle i
-            # We want all examples from puzzle 0 to puzzle max_puzzles-1
             if max_puzzles < len(self.puzzle_indices):
                 end_idx = self.puzzle_indices[max_puzzles]
             else:
@@ -129,22 +273,7 @@ class ARCInstanceDataset(Dataset):
             # Update puzzle_indices
             self.puzzle_indices = self.puzzle_indices[:max_puzzles + 1]
         else:
-            # No limiting, no remapping needed
             self.id_mapping = None
-
-        # Setup augmentation
-        self.augment = augment
-        if augment:
-            self.augmentation = ARCGridAugmentation(
-                apply_rotation=True,
-                apply_color_permutation=False
-            )
-        else:
-            self.augmentation = None
-
-        print(f"Loaded {split}/{subset} dataset:")
-        print(f"  Total examples: {len(self.inputs)}")
-        print(f"  Total unique grids: {len(self.puzzle_identifiers)}")
 
     def __len__(self):
         """Return number of examples in the dataset."""
@@ -167,7 +296,6 @@ class ARCInstanceDataset(Dataset):
         grid = flat_grid.reshape(self.max_grid_size, self.max_grid_size)
 
         # Find actual grid content (values >= 2)
-        # Due to translational augmentation, grid can be anywhere in the 30x30 space
         content_mask = grid >= 2
         if content_mask.any():
             # Find bounding box of content
@@ -175,7 +303,7 @@ class ARCInstanceDataset(Dataset):
             cols_with_content = np.where(content_mask.any(axis=0))[0]
 
             min_row = rows_with_content.min()
-            max_row = rows_with_content.max() + 1  # +1 for exclusive end
+            max_row = rows_with_content.max() + 1
             min_col = cols_with_content.min()
             max_col = cols_with_content.max() + 1
 
@@ -186,7 +314,6 @@ class ARCInstanceDataset(Dataset):
             grid = np.array([[0]], dtype=np.uint8)
 
         # Convert from encoding (2-11) to colors (0-9)
-        # Convert to int16 first to avoid underflow
         grid = grid.astype(np.int16) - 2
         grid = np.clip(grid, 0, 9).astype(np.uint8)
 
@@ -209,11 +336,15 @@ class ARCInstanceDataset(Dataset):
         grid, original_shape = self._unflatten_grid(flat_grid)
 
         # Get grid ID (puzzle identifier)
-        # Find which puzzle this example belongs to
-        puzzle_idx = np.searchsorted(self.puzzle_indices[1:], idx, side='right')
-        grid_id = self.puzzle_identifiers[puzzle_idx]
+        if self._grid_puzzle_ids is not None:
+            # Using direct mapping from raw JSON loading
+            grid_id = self._grid_puzzle_ids[idx]
+        else:
+            # Using puzzle_indices for preprocessed data
+            puzzle_idx = np.searchsorted(self.puzzle_indices[1:], idx, side='right')
+            grid_id = self.puzzle_identifiers[puzzle_idx]
 
-        # Apply augmentation
+        # Apply runtime augmentation
         if self.augmentation is not None:
             grid = self.augmentation(grid)
 

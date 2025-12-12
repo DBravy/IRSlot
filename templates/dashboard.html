@@ -419,11 +419,37 @@
                     <input type="number" id="max_puzzles" class="form-input" placeholder="All puzzles">
                 </div>
 
+                <div style="grid-column: 1 / -1; border-top: 1px solid #2a2a3e; padding-top: 15px; margin-top: 10px;">
+                    <h3 style="color: #667eea; margin-bottom: 15px; font-size: 1.1em;">Single Puzzle Mode</h3>
+                    <p style="color: #888; font-size: 0.85em; margin-bottom: 15px;">
+                        Train on a single puzzle and its augmentations. Loads directly from raw JSON files.
+                    </p>
+                </div>
+
                 <div>
                     <label class="form-label">Puzzle Filter (optional)</label>
                     <input type="text" id="puzzle_filter" class="form-input" placeholder="e.g., 23b5c85d">
                     <span style="color: #666; font-size: 0.75em;">
-                        Train on single puzzle + augmentations only
+                        Leave empty for full dataset
+                    </span>
+                </div>
+
+                <div>
+                    <label class="form-label">ARC Version</label>
+                    <select id="arc_version" class="form-input">
+                        <option value="1">ARC-AGI 1</option>
+                        <option value="2">ARC-AGI 2</option>
+                    </select>
+                    <span style="color: #666; font-size: 0.75em;">
+                        Required when using puzzle filter
+                    </span>
+                </div>
+
+                <div>
+                    <label class="form-label">Num Augmentations</label>
+                    <input type="number" id="num_augmentations" class="form-input" value="200">
+                    <span style="color: #666; font-size: 0.75em;">
+                        Augmentations per puzzle
                     </span>
                 </div>
 
@@ -832,10 +858,12 @@
                 config.max_puzzles = parseInt(maxPuzzles);
             }
 
-            // Add puzzle_filter if specified
+            // Add puzzle_filter if specified (single puzzle mode)
             const puzzleFilter = document.getElementById('puzzle_filter').value;
             if (puzzleFilter && puzzleFilter.trim() !== '') {
                 config.puzzle_filter = puzzleFilter.trim();
+                config.arc_version = parseInt(document.getElementById('arc_version').value);
+                config.num_augmentations = parseInt(document.getElementById('num_augmentations').value);
             }
 
             // Add color_embed_lr if specified (otherwise uses main lr)
