@@ -628,8 +628,8 @@ def train_epoch(epoch):
         model_type = config.get('model_type', 'standard')
 
         # Forward pass
-        if model_type == 'hierarchical':
-            # Hierarchical model: color entropy loss not applicable (color segmentation is hard-coded)
+        if model_type == 'hierarchical' or model_type == 'baseline':
+            # Hierarchical/baseline model: color entropy loss not applicable
             embeddings, slots = model(grids, return_attn=False)
             entropy_loss = torch.tensor(0.0, device=device)
             entropy_metrics = {'color_entropy': 0.0}
@@ -748,7 +748,8 @@ def train_epoch(epoch):
             step_batch_count = 0
 
         # Generate and send attention visualizations every 20 batches
-        if batch_idx == 0 or (batch_idx + 1) % 20 == 0:
+        # Skip for baseline model (no attention weights)
+        if model_type != 'baseline' and (batch_idx == 0 or (batch_idx + 1) % 20 == 0):
             # Only generate and send if not paused
             if not training_state['attention_viz_paused']:
                 try:
