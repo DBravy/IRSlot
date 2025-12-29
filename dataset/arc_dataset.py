@@ -354,14 +354,15 @@ class ARCInstanceDataset(Dataset):
         # Unflatten to 2D
         grid, original_shape = self._unflatten_grid(flat_grid)
 
-        # Get grid ID (puzzle identifier)
+        # Get grid ID (0-indexed puzzle index for memory bank compatibility)
         if self._grid_puzzle_ids is not None:
             # Using direct mapping from raw JSON loading
             grid_id = self._grid_puzzle_ids[idx]
         else:
             # Using puzzle_indices for preprocessed data
-            puzzle_idx = np.searchsorted(self.puzzle_indices[1:], idx, side='right')
-            grid_id = self.puzzle_identifiers[puzzle_idx]
+            # Use puzzle_idx directly (0-indexed) instead of puzzle_identifiers value
+            # to ensure grid IDs are valid memory bank indices
+            grid_id = np.searchsorted(self.puzzle_indices[1:], idx, side='right')
 
         # Apply runtime augmentation
         if self.augmentation is not None:

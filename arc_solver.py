@@ -126,6 +126,13 @@ class SlotEncoder(nn.Module):
         # Property dimensions: size(1) + centroid(2) + bbox(4) + colors(num_colors)
         self.prop_dim = 7 + num_colors
         
+        # Fuse explicit properties back into slot representations
+        self.prop_injector = nn.Sequential(
+            nn.Linear(slot_dim + self.prop_dim, slot_dim * 2),
+            nn.GELU(),
+            nn.Linear(slot_dim * 2, slot_dim)
+        )
+        
     def forward(self, grid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -201,6 +208,10 @@ class SlotEncoder(nn.Module):
 
         # Compute properties
         props = self._compute_props(attn, grid)
+        
+        # Fuse explicit properties into slot representations
+        slots_with_props = torch.cat([slots, props], dim=-1)  # [B, num_slots, slot_dim + prop_dim]
+        slots = self.prop_injector(slots_with_props)  # [B, num_slots, slot_dim]
 
         return slots, attn, props
     
@@ -825,6 +836,80 @@ def visualize_prediction(
     print()
 
 
+def visualize_prediction_matplotlib(
+    test_input: torch.Tensor,
+    prediction: torch.Tensor,
+    test_output: Optional[torch.Tensor] = None,
+    title: str = "ARC Puzzle Result",
+    save_path: Optional[str] = None
+):
+    """
+    Show colored grid visualization using matplotlib.
+
+    Args:
+        test_input: [H, W] input grid
+        prediction: [H, W] predicted output
+        test_output: [H, W] ground truth (optional)
+        title: Plot title
+        save_path: If provided, save to this path instead of showing
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    import numpy as np
+
+    # ARC color palette (official colors)
+    ARC_COLORS = [
+        '#000000',  # 0: black
+        '#0074D9',  # 1: blue
+        '#FF4136',  # 2: red
+        '#2ECC40',  # 3: green
+        '#FFDC00',  # 4: yellow
+        '#AAAAAA',  # 5: gray
+        '#F012BE',  # 6: magenta
+        '#FF851B',  # 7: orange
+        '#7FDBFF',  # 8: cyan
+        '#870C25',  # 9: brown
+    ]
+    cmap = ListedColormap(ARC_COLORS)
+
+    # Convert to numpy
+    inp_np = test_input.cpu().numpy() if isinstance(test_input, torch.Tensor) else test_input
+    pred_np = prediction.cpu().numpy() if isinstance(prediction, torch.Tensor) else prediction
+    gt_np = test_output.cpu().numpy() if test_output is not None and isinstance(test_output, torch.Tensor) else test_output
+
+    # Determine layout
+    num_plots = 3 if gt_np is not None else 2
+    fig, axes = plt.subplots(1, num_plots, figsize=(4 * num_plots, 4))
+
+    def plot_grid(ax, grid, subtitle):
+        ax.imshow(grid, cmap=cmap, vmin=0, vmax=9)
+        ax.set_title(subtitle)
+        ax.set_xticks(np.arange(-0.5, grid.shape[1], 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, grid.shape[0], 1), minor=True)
+        ax.grid(which='minor', color='white', linewidth=0.5)
+        ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
+
+    plot_grid(axes[0], inp_np, 'Test Input')
+    plot_grid(axes[1], pred_np, 'Prediction')
+
+    if gt_np is not None:
+        plot_grid(axes[2], gt_np, 'Ground Truth')
+        # Check if prediction matches
+        if pred_np.shape == gt_np.shape:
+            match = np.array_equal(pred_np, gt_np)
+            accuracy = (pred_np == gt_np).mean()
+            axes[1].set_title(f'Prediction {"✓" if match else "✗"} ({accuracy:.1%})')
+
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Visualization saved to: {save_path}")
+    else:
+        plt.show()
+
+
 # =============================================================================
 # Puzzle Loading
 # =============================================================================
@@ -907,6 +992,7 @@ if __name__ == '__main__':
     parser.add_argument('--color-slots', action='store_true', help='Use rigid color-based slots (one slot per color)')
     parser.add_argument('--batch-size', type=int, default=32, help='Batch size for GPU efficiency')
     parser.add_argument('--no-amp', action='store_true', help='Disable mixed precision training')
+    parser.add_argument('--save-viz', type=str, default=None, help='Save visualization to file (e.g., result.png)')
     args = parser.parse_args()
 
     # Load puzzle
