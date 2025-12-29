@@ -1107,6 +1107,69 @@ def api_toggle_attention_viz():
     })
 
 
+@app.route('/api/save_checkpoint_now', methods=['POST'])
+def api_save_checkpoint_now():
+    """Save a checkpoint immediately without stopping training."""
+    if training_state['status'] not in ['running', 'paused']:
+        return jsonify({'error': 'Training is not active'}), 400
+
+    if training_components['model'] is None:
+        return jsonify({'error': 'No model to save'}), 400
+
+    try:
+        epoch = training_state['current_epoch']
+        config = training_components['config']
+        checkpoint_dir = config.get('checkpoint_dir', 'checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Create a timestamped filename to avoid overwriting scheduled checkpoints
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'manual_checkpoint_epoch_{epoch}_{timestamp}.pt'
+        path = os.path.join(checkpoint_dir, filename)
+
+        # Get current metrics from training state
+        metrics = {}
+        if training_state['metrics']['train_loss']:
+            idx = len(training_state['metrics']['train_loss']) - 1
+            metrics = {
+                'loss': training_state['metrics']['train_loss'][idx],
+                'accuracy': training_state['metrics']['train_accuracy'][idx],
+                'avg_positive_sim': training_state['metrics']['positive_similarity'][idx],
+                'avg_negative_sim': training_state['metrics']['negative_similarity'][idx],
+            }
+
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': training_components['model'].state_dict(),
+            'memory_bank_state_dict': training_components['memory_bank'].state_dict(),
+            'optimizer_state_dict': training_components['optimizer'].state_dict(),
+            'metrics': metrics,
+            'config': config,
+            'manual_save': True,
+            'timestamp': timestamp,
+        }, path)
+
+        print(f"Manual checkpoint saved: {path}")
+        socketio.emit('checkpoint_saved', {
+            'path': path,
+            'epoch': epoch,
+            'timestamp': timestamp
+        })
+
+        return jsonify({
+            'status': 'saved',
+            'path': path,
+            'epoch': epoch,
+            'timestamp': timestamp
+        })
+
+    except Exception as e:
+        print(f"ERROR saving manual checkpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to save checkpoint: {str(e)}'}), 500
+
+
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection."""

@@ -567,6 +567,9 @@
                 <button class="btn btn-stop" id="btn-stop" onclick="stopTraining()" disabled>
                     ⏹ Stop
                 </button>
+                <button class="btn btn-save" id="btn-save-checkpoint" onclick="saveCheckpointNow()" disabled>
+                    💾 Save Checkpoint
+                </button>
             </div>
         </div>
     </div>
@@ -1031,6 +1034,35 @@
                 .catch(err => console.error('Error toggling attention viz:', err));
         }
 
+        function saveCheckpointNow() {
+            console.log('💾 Save checkpoint button clicked');
+            const btn = document.getElementById('btn-save-checkpoint');
+            const originalText = btn.textContent;
+            btn.textContent = '💾 Saving...';
+            btn.disabled = true;
+
+            fetch('/api/save_checkpoint_now', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    console.log('Save checkpoint response:', data);
+                    if (data.error) {
+                        alert('Error saving checkpoint: ' + data.error);
+                    } else {
+                        alert(`Checkpoint saved!\n\nPath: ${data.path}\nEpoch: ${data.epoch}`);
+                    }
+                })
+                .catch(err => {
+                    console.error('Error saving checkpoint:', err);
+                    alert('Failed to save checkpoint. Check console for details.');
+                })
+                .finally(() => {
+                    btn.textContent = originalText;
+                    // Re-enable if training is still active
+                    const status = document.getElementById('status').textContent.toLowerCase();
+                    btn.disabled = !(status === 'running' || status === 'paused');
+                });
+        }
+
         function updateAttentionVizButton(paused) {
             const btn = document.getElementById('btn-toggle-attention-viz');
             if (paused) {
@@ -1047,6 +1079,7 @@
             const btnStart = document.getElementById('btn-start');
             const btnPause = document.getElementById('btn-pause');
             const btnStop = document.getElementById('btn-stop');
+            const btnSaveCheckpoint = document.getElementById('btn-save-checkpoint');
 
             console.log('Updating buttons for status:', status);
 
@@ -1055,16 +1088,19 @@
                 btnStart.textContent = status === 'stopped' || status === 'completed' ? '▶ Start New Training' : '▶ Start Training';
                 btnPause.disabled = true;
                 btnStop.disabled = true;
+                btnSaveCheckpoint.disabled = true;
             } else if (status === 'running') {
                 btnStart.disabled = true;
                 btnPause.disabled = false;
                 btnPause.textContent = '⏸ Pause';
                 btnStop.disabled = false;
+                btnSaveCheckpoint.disabled = false;
             } else if (status === 'paused') {
                 btnStart.disabled = false;
                 btnStart.textContent = '▶ Resume';
                 btnPause.disabled = true;
                 btnStop.disabled = false;
+                btnSaveCheckpoint.disabled = false;
             }
         }
 
@@ -1149,6 +1185,7 @@
         window.stopTraining = stopTraining;
         window.saveConfiguration = saveConfiguration;
         window.toggleAttentionViz = toggleAttentionViz;
+        window.saveCheckpointNow = saveCheckpointNow;
 
         // Update hard attention label based on checkbox state
         function updateHardAttentionLabel() {

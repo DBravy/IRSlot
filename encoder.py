@@ -19,11 +19,8 @@ class ARCGridEncoder(nn.Module):
         self.feature_dim = feature_dim
         self.hidden_dim = hidden_dim
 
-        # Embedding layer for colors (0-9 -> one-hot or learned embedding)
-        self.color_embedding = nn.Embedding(num_colors, hidden_dim)
-
-        # CNN encoder
-        self.conv1 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        # CNN encoder (input is one-hot encoded colors)
+        self.conv1 = nn.Conv2d(num_colors, hidden_dim, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(hidden_dim)
 
         self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
@@ -46,20 +43,17 @@ class ARCGridEncoder(nn.Module):
         """
         B, H, W = grids.shape
 
-        # Embed colors: [B, H, W] -> [B, H, W, hidden_dim]
-        x = self.color_embedding(grids)
+        # One-hot encode colors: [B, H, W] -> [B, H, W, num_colors]
+        x = F.one_hot(grids, num_classes=self.num_colors).float()
 
-        # Permute to [B, hidden_dim, H, W] for convolutions
+        # Permute to [B, num_colors, H, W] for convolutions
         x = x.permute(0, 3, 1, 2)
 
-        # Apply conv layers with residual connections
-        identity = x
+        # Apply conv layers with residual connection
         x = self.relu(self.bn1(self.conv1(x)))
+        identity = x
         x = self.relu(self.bn2(self.conv2(x)))
-
-        # Residual connection
-        if identity.shape[1] == x.shape[1]:
-            x = x + identity
+        x = x + identity  # Residual connection
 
         x = self.relu(self.bn3(self.conv3(x)))
         x = self.conv4(x)
