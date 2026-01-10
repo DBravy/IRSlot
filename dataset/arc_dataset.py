@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 from augmentation import ARCGridAugmentation
 from dataset.common import dihedral_transform
+from mask_supervision import extract_object_masks
 
 
 # Constants for grid encoding
@@ -50,7 +51,8 @@ class ARCInstanceDataset(Dataset):
     """
     def __init__(self, data_dir, split='train', subset='all', augment=True, max_grid_size=30,
                  max_puzzles=None, puzzle_filter=None, arc_version=None, num_augmentations=200,
-                 raw_data_dir='kaggle/combined', grid_type='both'):
+                 raw_data_dir='kaggle/combined', grid_type='both', num_slots=7,
+                 return_masks=False):
         """
         Args:
             data_dir: Root directory containing the processed dataset (used when puzzle_filter is None)
@@ -64,6 +66,8 @@ class ARCInstanceDataset(Dataset):
             num_augmentations: Number of augmentations to generate when using puzzle_filter
             raw_data_dir: Directory containing raw ARC JSON files
             grid_type: Which grids to use for single puzzle mode: 'input', 'output', or 'both' (default)
+            num_slots: Number of slots for mask generation (default 7)
+            return_masks: Whether to return ground truth object masks (default False)
         """
         self.data_dir = data_dir
         self.split = split
@@ -71,6 +75,8 @@ class ARCInstanceDataset(Dataset):
         self.max_grid_size = max_grid_size
         self.puzzle_filter = puzzle_filter
         self.grid_type = grid_type
+        self.num_slots = num_slots
+        self.return_masks = return_masks
 
         if puzzle_filter is not None:
             # Load from raw JSON and generate augmentations on-the-fly
@@ -347,6 +353,8 @@ class ARCInstanceDataset(Dataset):
             - grid_id: int - Unique grid identifier
             - grid: torch.Tensor [H, W] - Augmented grid
             - original_shape: tuple (H, W) - Shape before padding
+            - masks: torch.Tensor [num_slots, H, W] - Object masks (if return_masks=True)
+            - num_objects: int - Number of foreground objects (if return_masks=True)
         """
         # Get flattened grid
         flat_grid = self.inputs[idx]
@@ -368,14 +376,28 @@ class ARCInstanceDataset(Dataset):
         if self.augmentation is not None:
             grid = self.augmentation(grid)
 
+        # Generate ground truth masks if requested
+        if self.return_masks:
+            masks, num_objects = extract_object_masks(grid, self.num_slots)
+            masks = torch.from_numpy(masks).float()
+        else:
+            masks = None
+            num_objects = 0
+
         # Convert to tensor (copy needed for negative strides from flips)
         grid = torch.from_numpy(grid.copy()).long()
 
-        return {
+        result = {
             'grid_id': grid_id,
             'grid': grid,
             'original_shape': original_shape
         }
+
+        if self.return_masks:
+            result['masks'] = masks
+            result['num_objects'] = num_objects
+
+        return result
 
 
 def collate_fn_pad(batch):
@@ -390,6 +412,8 @@ def collate_fn_pad(batch):
         - grid_ids: [B] - Grid identifiers
         - grids: [B, H, W] - Padded grids
         - original_shapes: list of (H, W) tuples
+        - masks: [B, num_slots, H, W] - Padded masks (if present in batch)
+        - num_objects: [B] - Number of objects per sample (if masks present)
     """
     grid_ids = torch.tensor([item['grid_id'] for item in batch])
     original_shapes = [item['original_shape'] for item in batch]
@@ -414,8 +438,30 @@ def collate_fn_pad(batch):
 
     grids = torch.stack(padded_grids, dim=0)
 
-    return {
+    result = {
         'grid_ids': grid_ids,
         'grids': grids,
         'original_shapes': original_shapes
     }
+
+    # Handle masks if present
+    if 'masks' in batch[0] and batch[0]['masks'] is not None:
+        num_slots = batch[0]['masks'].shape[0]
+        padded_masks = []
+
+        for item in batch:
+            masks = item['masks']  # [num_slots, H, W]
+            H, W = masks.shape[1], masks.shape[2]
+
+            # Pad masks to max size
+            if H < max_H or W < max_W:
+                padded = torch.zeros(num_slots, max_H, max_W, dtype=masks.dtype)
+                padded[:, :H, :W] = masks
+                padded_masks.append(padded)
+            else:
+                padded_masks.append(masks)
+
+        result['masks'] = torch.stack(padded_masks, dim=0)
+        result['num_objects'] = torch.tensor([item['num_objects'] for item in batch])
+
+    return result
