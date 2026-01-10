@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from encoder import ARCGridEncoder
 from slot import SlotAttention, SlotAttentionNoPos
-
+# XOXOXO
 
 class SlotInstanceModel(nn.Module):
     """
