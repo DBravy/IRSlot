@@ -271,27 +271,44 @@ def hungarian_match(
     for b in range(B):
         n_obj = int(num_objects[b].item())
 
-        if n_obj == 0:
-            # No objects to match
+        # No objects to match or no prediction slots
+        if n_obj == 0 or num_pred == 0:
             assignments.append(([], []))
             continue
+
+        # Clamp n_obj to available GT slots
+        n_obj = min(n_obj, num_gt)
 
         # Compute pairwise Dice scores
         # pred_masks[b]: (num_pred, H, W)
         # gt_masks[b, :n_obj]: (n_obj, H, W)
-        pred_b = pred_masks[b]  # (num_pred, H, W)
-        gt_b = gt_masks[b, :n_obj]  # (n_obj, H, W)
+        pred_b = pred_masks[b].detach()  # (num_pred, H, W)
+        gt_b = gt_masks[b, :n_obj].detach()  # (n_obj, H, W)
 
         # Compute cost matrix (negative Dice = we want to maximize Dice)
         cost_matrix = np.zeros((num_pred, n_obj), dtype=np.float32)
 
         for i in range(num_pred):
             for j in range(n_obj):
-                dice = dice_coefficient(
-                    pred_b[i:i+1],
-                    gt_b[j:j+1]
-                ).item()
-                cost_matrix[i, j] = -dice  # Negative because we minimize cost
+                # Get masks and ensure they're valid
+                pred_mask = pred_b[i]  # (H, W)
+                gt_mask = gt_b[j]  # (H, W)
+
+                # Compute Dice directly to avoid shape issues
+                pred_flat = pred_mask.flatten()  # (H*W,)
+                gt_flat = gt_mask.flatten()  # (H*W,)
+
+                # Handle empty masks
+                if pred_flat.numel() == 0 or gt_flat.numel() == 0:
+                    cost_matrix[i, j] = -0.0  # No overlap
+                    continue
+
+                intersection = (pred_flat * gt_flat).sum()
+                union = pred_flat.sum() + gt_flat.sum()
+
+                eps = 1e-6
+                dice = (2 * intersection + eps) / (union + eps)
+                cost_matrix[i, j] = -dice.item()  # Negative because we minimize cost
 
         # Hungarian algorithm
         pred_idx, gt_idx = linear_sum_assignment(cost_matrix)
