@@ -6,3 +6,10 @@ tqdm>=4.65.0
 flask>=3.0.0
 flask-socketio>=5.3.0
 python-socketio>=5.10.0
+
+# PyTorch Geometric (for GNN encoder)
+# Note: May require specific installation based on PyTorch/CUDA version
+# See: https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html
+torch-geometric>=2.4.0
+torch-scatter>=2.1.0
+torch-sparse>=0.6.0

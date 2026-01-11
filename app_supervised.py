@@ -27,7 +27,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO
 from torch.utils.data import DataLoader
 
-from model import SlotInstanceModel
+from model import SlotInstanceModel, GNNSlotInstanceModel
 from mask_supervision import MaskSupervisionLoss, extract_object_masks
 from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
 
@@ -240,20 +240,45 @@ def initialize_training(config):
         pin_memory=True if device == 'cuda' else False
     )
 
-    # Create model
-    print("Creating model...")
-    model = SlotInstanceModel(
-        num_colors=10,
-        encoder_feature_dim=config['encoder_feature_dim'],
-        encoder_hidden_dim=config['encoder_hidden_dim'],
-        num_slots=config['num_slots'],
-        slot_dim=config['slot_dim'],
-        num_iterations=config['num_iterations'],
-        embedding_dim=config['embedding_dim'],
-        max_grid_size=30,
-        hard_attention=config.get('hard_attention', False),
-        gumbel_temperature=config.get('gumbel_temperature', 1.0)
-    ).to(device)
+    # Create model based on encoder type
+    encoder_type = config.get('encoder_type', 'cnn')
+    print(f"Creating model with {encoder_type.upper()} encoder...")
+
+    if encoder_type == 'cnn':
+        model = SlotInstanceModel(
+            num_colors=10,
+            encoder_feature_dim=config['encoder_feature_dim'],
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            num_slots=config['num_slots'],
+            slot_dim=config['slot_dim'],
+            num_iterations=config['num_iterations'],
+            embedding_dim=config['embedding_dim'],
+            max_grid_size=30,
+            hard_attention=config.get('hard_attention', False),
+            gumbel_temperature=config.get('gumbel_temperature', 1.0)
+        ).to(device)
+
+    elif encoder_type == 'gnn':
+        model = GNNSlotInstanceModel(
+            num_colors=10,
+            encoder_feature_dim=config['encoder_feature_dim'],
+            encoder_hidden_dim=config['encoder_hidden_dim'],
+            num_slots=config['num_slots'],
+            slot_dim=config['slot_dim'],
+            num_iterations=config['num_iterations'],
+            embedding_dim=config['embedding_dim'],
+            max_grid_size=30,
+            hard_attention=config.get('hard_attention', False),
+            gumbel_temperature=config.get('gumbel_temperature', 1.0),
+            # GNN-specific parameters
+            gnn_num_layers=config.get('gnn_num_layers', 4),
+            gnn_edge_connectivity=config.get('gnn_edge_connectivity', 4),
+            gnn_use_position=config.get('gnn_use_position', True),
+            gnn_dropout=config.get('gnn_dropout', 0.0)
+        ).to(device)
+
+    else:
+        raise ValueError(f"Unknown encoder_type: {encoder_type}. Choose 'cnn' or 'gnn'.")
 
     # Create loss function
     criterion = MaskSupervisionLoss(
@@ -282,10 +307,13 @@ def initialize_training(config):
     training_state['total_epochs'] = config['num_epochs']
     training_state['total_batches'] = len(dataloader)
     training_state['global_step'] = 0
-    training_state['config'] = {
+
+    # Build config for display
+    display_config = {
         'data_dir': config['data_dir'],
         'dataset_size': len(dataset),
         'unique_grids': len(dataset.puzzle_identifiers),
+        'encoder_type': encoder_type,
         'num_slots': config['num_slots'],
         'slot_dim': config['slot_dim'],
         'embedding_dim': config['embedding_dim'],
@@ -298,9 +326,26 @@ def initialize_training(config):
         'device': device,
     }
 
+    # Add GNN-specific config if using GNN encoder
+    if encoder_type == 'gnn':
+        display_config.update({
+            'gnn_num_layers': config.get('gnn_num_layers', 4),
+            'gnn_edge_connectivity': config.get('gnn_edge_connectivity', 4),
+            'gnn_use_position': config.get('gnn_use_position', True),
+            'gnn_dropout': config.get('gnn_dropout', 0.0),
+        })
+
+    training_state['config'] = display_config
+
     print(f"Dataset loaded: {len(dataset)} examples")
     print(f"Unique grids: {len(dataset.puzzle_identifiers)}")
-    print(f"Model created: {sum(p.numel() for p in model.parameters()):,} parameters")
+    print(f"Encoder: {encoder_type.upper()}")
+    if encoder_type == 'gnn':
+        print(f"  GNN layers: {config.get('gnn_num_layers', 4)}")
+        print(f"  Edge connectivity: {config.get('gnn_edge_connectivity', 4)}-connected")
+        print(f"  Position features: {config.get('gnn_use_position', True)}")
+        print(f"  Dropout: {config.get('gnn_dropout', 0.0)}")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
 
     return True

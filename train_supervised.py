@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model import SlotInstanceModel
+from model import SlotInstanceModel, GNNSlotInstanceModel
 from mask_supervision import MaskSupervisionLoss
 from dataset.arc_dataset import ARCInstanceDataset, collate_fn_pad
 
@@ -45,6 +45,22 @@ def parse_args():
                         help='Use Gumbel-Softmax for hard attention (default: False)')
     parser.add_argument('--gumbel_temperature', type=float, default=1.0,
                         help='Gumbel-Softmax temperature (default: 1.0)')
+
+    # Encoder selection
+    parser.add_argument('--encoder_type', type=str, default='cnn',
+                        choices=['cnn', 'gnn'],
+                        help='Encoder type: cnn or gnn (default: cnn)')
+
+    # GNN-specific arguments (only used when encoder_type='gnn')
+    parser.add_argument('--gnn_num_layers', type=int, default=4,
+                        help='Number of GNN layers (default: 4)')
+    parser.add_argument('--gnn_edge_connectivity', type=int, default=4,
+                        choices=[4, 8],
+                        help='Edge connectivity: 4 or 8 (default: 4)')
+    parser.add_argument('--gnn_use_position', action='store_true', default=True,
+                        help='Include position features in GNN (default: True)')
+    parser.add_argument('--gnn_dropout', type=float, default=0.0,
+                        help='Dropout rate for GNN layers (default: 0.0)')
 
     # Loss weights
     parser.add_argument('--bg_weight', type=float, default=1.0,
@@ -222,21 +238,51 @@ def main():
     print(f"Number of batches per epoch: {len(dataloader)}")
     print()
 
-    # Create model
-    print("Creating model...")
-    model = SlotInstanceModel(
-        num_colors=10,
-        encoder_feature_dim=args.encoder_feature_dim,
-        encoder_hidden_dim=args.encoder_hidden_dim,
-        num_slots=args.num_slots,
-        slot_dim=args.slot_dim,
-        num_iterations=args.num_iterations,
-        embedding_dim=args.embedding_dim,
-        max_grid_size=30,
-        hard_attention=args.hard_attention,
-        gumbel_temperature=args.gumbel_temperature
-    ).to(args.device)
+    # Create model based on encoder type
+    print(f"Creating model with {args.encoder_type.upper()} encoder...")
 
+    if args.encoder_type == 'cnn':
+        model = SlotInstanceModel(
+            num_colors=10,
+            encoder_feature_dim=args.encoder_feature_dim,
+            encoder_hidden_dim=args.encoder_hidden_dim,
+            num_slots=args.num_slots,
+            slot_dim=args.slot_dim,
+            num_iterations=args.num_iterations,
+            embedding_dim=args.embedding_dim,
+            max_grid_size=30,
+            hard_attention=args.hard_attention,
+            gumbel_temperature=args.gumbel_temperature
+        ).to(args.device)
+
+    elif args.encoder_type == 'gnn':
+        model = GNNSlotInstanceModel(
+            num_colors=10,
+            encoder_feature_dim=args.encoder_feature_dim,
+            encoder_hidden_dim=args.encoder_hidden_dim,
+            num_slots=args.num_slots,
+            slot_dim=args.slot_dim,
+            num_iterations=args.num_iterations,
+            embedding_dim=args.embedding_dim,
+            max_grid_size=30,
+            hard_attention=args.hard_attention,
+            gumbel_temperature=args.gumbel_temperature,
+            # GNN-specific parameters
+            gnn_num_layers=args.gnn_num_layers,
+            gnn_edge_connectivity=args.gnn_edge_connectivity,
+            gnn_use_position=args.gnn_use_position,
+            gnn_dropout=args.gnn_dropout
+        ).to(args.device)
+
+    else:
+        raise ValueError(f"Unknown encoder_type: {args.encoder_type}")
+
+    print(f"Encoder: {args.encoder_type.upper()}")
+    if args.encoder_type == 'gnn':
+        print(f"  GNN layers: {args.gnn_num_layers}")
+        print(f"  Edge connectivity: {args.gnn_edge_connectivity}-connected")
+        print(f"  Position features: {args.gnn_use_position}")
+        print(f"  Dropout: {args.gnn_dropout}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
 

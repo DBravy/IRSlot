@@ -6,6 +6,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from encoder import ARCGridEncoder
 from slot import SlotAttention, SlotAttentionNoPos
+
+try:
+    from encoder_gnn import ARCGridGNNEncoder
+    HAS_GNN = True
+except ImportError:
+    HAS_GNN = False
 # XOXOXO
 
 class SlotInstanceModel(nn.Module):
@@ -571,3 +577,163 @@ class CNNBaselineModel(nn.Module):
         """Convenience method to get just embeddings."""
         embeddings, _ = self.forward(grids)
         return embeddings
+
+
+class GNNSlotInstanceModel(nn.Module):
+    """
+    Full model for instance recognition using GNN encoder + Slot Attention.
+
+    Architecture:
+    1. GNN Encoder: Converts grid to feature maps via graph convolutions
+    2. Slot Attention: Decomposes features into object slots
+    3. Pooling: Aggregates slots into single embedding
+    4. Projection: Projects to embedding space for contrastive learning
+
+    Identical to SlotInstanceModel except uses GNN encoder instead of CNN.
+    """
+    def __init__(
+        self,
+        num_colors=10,
+        encoder_feature_dim=64,
+        encoder_hidden_dim=128,
+        num_slots=7,
+        slot_dim=64,
+        num_iterations=3,
+        embedding_dim=128,
+        max_grid_size=30,
+        hard_attention=False,
+        gumbel_temperature=1.0,
+        # GNN-specific parameters
+        gnn_num_layers=4,
+        gnn_edge_connectivity=4,
+        gnn_use_position=True,
+        gnn_dropout=0.0
+    ):
+        """
+        Args:
+            num_colors: Number of colors in ARC grids (0-9 = 10 colors)
+            encoder_feature_dim: Feature dimension from encoder
+            encoder_hidden_dim: Hidden dimension in encoder
+            num_slots: Number of slots for slot attention
+            slot_dim: Dimension of each slot
+            num_iterations: Number of slot attention iterations
+            embedding_dim: Final embedding dimension for contrastive learning
+            max_grid_size: Maximum grid size (30 for ARC)
+            hard_attention: If True, use Gumbel-Softmax for binary attention
+            gumbel_temperature: Temperature for Gumbel-Softmax (lower = harder)
+            gnn_num_layers: Number of GNN layers (default: 4)
+            gnn_edge_connectivity: Edge connectivity - 4 or 8 (default: 4)
+            gnn_use_position: Include position features in GNN (default: True)
+            gnn_dropout: Dropout rate for GNN layers (default: 0.0)
+        """
+        super().__init__()
+
+        if not HAS_GNN:
+            raise ImportError(
+                "GNN encoder not available. Install PyTorch Geometric: "
+                "pip install torch-geometric torch-scatter torch-sparse"
+            )
+
+        self.num_colors = num_colors
+        self.num_slots = num_slots
+        self.slot_dim = slot_dim
+        self.embedding_dim = embedding_dim
+
+        # GNN Encoder: Grid -> Features (via graph convolutions)
+        self.encoder = ARCGridGNNEncoder(
+            num_colors=num_colors,
+            feature_dim=encoder_feature_dim,
+            hidden_dim=encoder_hidden_dim,
+            num_layers=gnn_num_layers,
+            edge_connectivity=gnn_edge_connectivity,
+            use_position_features=gnn_use_position,
+            dropout=gnn_dropout
+        )
+
+        # Slot Attention (identical to CNN version)
+        self.slot_attention = SlotAttention(
+            num_slots=num_slots,
+            slot_dim=slot_dim,
+            feature_dim=encoder_feature_dim,
+            num_iterations=num_iterations,
+            hidden_dim=128,
+            max_spatial_size=max_grid_size,
+            hard_attention=hard_attention,
+            gumbel_temperature=gumbel_temperature
+        )
+
+        # Projection head (identical to CNN version)
+        self.projection_head = nn.Sequential(
+            nn.Linear(slot_dim, slot_dim),
+            nn.ReLU(),
+            nn.Linear(slot_dim, embedding_dim)
+        )
+
+    def forward(self, grids, return_attn=False):
+        """
+        Forward pass.
+
+        Args:
+            grids: [B, H, W] - Input grids with integer values 0-9
+            return_attn: If True, return attention weights from slot attention
+
+        Returns:
+            embeddings: [B, embedding_dim] - Final embeddings for contrastive learning
+            slots: [B, num_slots, slot_dim] - Intermediate slot representations
+            attn_weights: [B, num_slots, H, W] - Attention masks (only if return_attn=True)
+        """
+        B, H, W = grids.shape
+
+        # Encode grids to features via GNN
+        # [B, H, W] -> [B, H*W, feature_dim]
+        features = self.encoder(grids)
+
+        # Apply slot attention
+        # [B, H*W, feature_dim] -> [B, num_slots, slot_dim]
+        if return_attn:
+            slots, attn_weights = self.slot_attention(features, spatial_size=(H, W), return_attn=True)
+            # Reshape attention weights from [B, num_slots, H*W] to [B, num_slots, H, W]
+            attn_weights = attn_weights.reshape(B, self.num_slots, H, W)
+        else:
+            slots = self.slot_attention(features, spatial_size=(H, W))
+
+        # Pool slots to get single representation
+        # Mean pooling across slots: [B, num_slots, slot_dim] -> [B, slot_dim]
+        pooled = slots.mean(dim=1)
+
+        # Project to embedding space
+        # [B, slot_dim] -> [B, embedding_dim]
+        embeddings = self.projection_head(pooled)
+
+        # Normalize embeddings for contrastive learning
+        embeddings = F.normalize(embeddings, dim=1)
+
+        if return_attn:
+            return embeddings, slots, attn_weights
+        return embeddings, slots
+
+    def get_embeddings(self, grids):
+        """
+        Convenience method to get just embeddings.
+
+        Args:
+            grids: [B, H, W]
+
+        Returns:
+            embeddings: [B, embedding_dim]
+        """
+        embeddings, _ = self.forward(grids)
+        return embeddings
+
+    def get_slots(self, grids):
+        """
+        Convenience method to get just slots.
+
+        Args:
+            grids: [B, H, W]
+
+        Returns:
+            slots: [B, num_slots, slot_dim]
+        """
+        _, slots = self.forward(grids)
+        return slots

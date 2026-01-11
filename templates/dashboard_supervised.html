@@ -422,6 +422,52 @@
                     <label class="form-label">Gumbel Temperature</label>
                     <input type="number" id="gumbel_temperature" class="form-input" value="1.0" step="0.1" min="0.01" max="10">
                 </div>
+
+                <div style="grid-column: 1 / -1; border-top: 1px solid #2a2a3e; padding-top: 15px; margin-top: 10px;">
+                    <h3 style="color: #10b981; margin-bottom: 15px; font-size: 1.1em;">Encoder Selection</h3>
+                </div>
+
+                <div style="grid-column: 1 / -1;">
+                    <label class="form-label">Encoder Type</label>
+                    <select id="encoder_type" class="form-input" onchange="toggleGNNFields()">
+                        <option value="cnn" selected>CNN (Convolutional Neural Network)</option>
+                        <option value="gnn">GNN (Graph Neural Network)</option>
+                    </select>
+                    <span style="color: #666; font-size: 0.75em;">GNN models grids as pixel-level graphs with connectivity patterns</span>
+                </div>
+
+                <div id="gnn-fields" style="display: none; grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; padding: 15px; background: #252538; border-radius: 10px; margin-top: 10px;">
+                    <div style="grid-column: 1 / -1;">
+                        <h4 style="color: #888; font-size: 0.9em; margin-bottom: 10px;">GNN-Specific Parameters</h4>
+                    </div>
+
+                    <div>
+                        <label class="form-label">GNN Layers</label>
+                        <input type="number" id="gnn_num_layers" class="form-input" value="4" min="1" max="8">
+                        <span style="color: #666; font-size: 0.75em;">4 layers = 4-hop receptive field</span>
+                    </div>
+
+                    <div>
+                        <label class="form-label">Edge Connectivity</label>
+                        <select id="gnn_edge_connectivity" class="form-input">
+                            <option value="4" selected>4-connected (up/down/left/right)</option>
+                            <option value="8">8-connected (includes diagonals)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="form-label">Position Features</label>
+                        <div style="display: flex; align-items: center; gap: 10px; margin-top: 5px;">
+                            <input type="checkbox" id="gnn_use_position" checked style="width: 20px; height: 20px; cursor: pointer;">
+                            <span id="gnn_position_label" style="color: #888;">Enabled (adds x,y coords)</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="form-label">GNN Dropout</label>
+                        <input type="number" id="gnn_dropout" class="form-input" value="0.0" step="0.1" min="0" max="0.9">
+                    </div>
+                </div>
             </form>
         </div>
     </div>
@@ -630,7 +676,12 @@
                 checkpoint_dir: document.getElementById('checkpoint_dir').value,
                 save_every: parseInt(document.getElementById('save_every').value),
                 hard_attention: document.getElementById('hard_attention').checked,
-                gumbel_temperature: parseFloat(document.getElementById('gumbel_temperature').value)
+                gumbel_temperature: parseFloat(document.getElementById('gumbel_temperature').value),
+                encoder_type: document.getElementById('encoder_type').value,
+                gnn_num_layers: parseInt(document.getElementById('gnn_num_layers').value),
+                gnn_edge_connectivity: parseInt(document.getElementById('gnn_edge_connectivity').value),
+                gnn_use_position: document.getElementById('gnn_use_position').checked,
+                gnn_dropout: parseFloat(document.getElementById('gnn_dropout').value)
             };
 
             const maxPuzzles = document.getElementById('max_puzzles').value;
@@ -639,6 +690,12 @@
             }
 
             return config;
+        }
+
+        function toggleGNNFields() {
+            const encoderType = document.getElementById('encoder_type').value;
+            const gnnFields = document.getElementById('gnn-fields');
+            gnnFields.style.display = (encoderType === 'gnn') ? 'grid' : 'none';
         }
 
         function updateConfigStatus(saved) {
@@ -798,6 +855,13 @@
             label.style.color = checkbox.checked ? '#4ade80' : '#888';
         }
 
+        function updateGNNPositionLabel() {
+            const checkbox = document.getElementById('gnn_use_position');
+            const label = document.getElementById('gnn_position_label');
+            label.textContent = checkbox.checked ? 'Enabled (adds x,y coords)' : 'Disabled (colors only)';
+            label.style.color = checkbox.checked ? '#4ade80' : '#888';
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             const formInputs = document.querySelectorAll('#config-form input, #config-form select');
             formInputs.forEach(input => {
@@ -806,6 +870,11 @@
             });
 
             document.getElementById('hard_attention').addEventListener('change', updateHardAttentionLabel);
+            document.getElementById('gnn_use_position').addEventListener('change', updateGNNPositionLabel);
+            document.getElementById('encoder_type').addEventListener('change', toggleGNNFields);
+
+            // Initialize UI state
+            toggleGNNFields();
 
             fetch('/api/get_config')
                 .then(res => res.json())
@@ -822,6 +891,8 @@
                             }
                         });
                         updateHardAttentionLabel();
+                        updateGNNPositionLabel();
+                        toggleGNNFields();
                         updateConfigStatus(data.config_saved);
                     }
                 });
